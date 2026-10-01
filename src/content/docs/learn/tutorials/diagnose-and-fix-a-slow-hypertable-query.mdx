@@ -5,7 +5,7 @@ description: Find and fix slow hypertable queries with TimescaleDB query plans, 
 
 import { NumberedList, NumberedItem } from "@components/NumberedList";
 
-This tutorial shows you how to find and fix slow queries on a hypertable through six case studies. It uses an sample manufacturing dataset that has hourly readings from ten sensors on each of five factory machines, over ten years, with about 4.4 million records in total.
+This tutorial shows you how to find and fix slow queries on a hypertable through six case studies. It uses a sample manufacturing dataset that has hourly readings from ten sensors on each of five factory machines, over ten years, with about 4.4 million records in total.
 
 If you want an overview of the settings that affect hypertable query speed first, see the guide [Improve hypertable and query performance](https://www.tigerdata.com/docs/build/performance-optimization/improve-hypertable-performance).
 
@@ -13,7 +13,7 @@ If you want an overview of the settings that affect hypertable query speed first
 
 - How to identify and diagnose a slow hypertable query plan.
 - How to read the parts of an `EXPLAIN (ANALYZE, BUFFERS)` plan that matter on a hypertable.
-- How time filters, `now()`, indexes, chunk size and chunk skipping affect query speed.
+- How time filters, `now()`, indexes, chunk size, and chunk skipping affect query speed.
 - Why a `DELETE` can lock every chunk in a hypertable, and how to limit the locks to the chunks it changes.
 
 ## Set up the data
@@ -23,7 +23,7 @@ If you want an overview of the settings that affect hypertable query speed first
 
 Create a Tiger Cloud service by following [our previous guide](https://www.tigerdata.com/docs/get-started/quickstart/create-service). Download the configuration file when you create it, and keep it for the next step. The file holds your connection string.
 
-> **Note:** You can also use follow this tutorial with a self-hosted TimescaleDB database instead.
+> **Note:** You can also follow this tutorial with a self-hosted TimescaleDB database instead.
 
 </NumberedItem>
 <NumberedItem title="Connect to your service">
@@ -269,11 +269,11 @@ Find these parts in the plan.
 
 - **Chunk lines.** Find the lines that name a chunk. Chunk names start with `_hyper_`. This plan has one chunk line, because yesterday's readings all sit in one weekly chunk.
 - **The scan type.** Read the start of each chunk line to see how PostgreSQL found the rows. An index scan or a bitmap scan uses an index. A sequential scan reads every row in the chunk.
-- **`Rows Removed by Filter`.** This line appears under a chunk line when PostgreSQL read rows and then discarded them because they didn't match the query. It doesn't appear in this plan, because the index found only matching rows. You will see it first in Case 1.
+- **`Rows Removed by Filter`.** This line appears under a chunk line when PostgreSQL read rows and then discarded them because they didn't match the query. It doesn't appear in this plan because the index found only matching rows. You will see it first in Case 1.
 - **The `Buffers` line.** Check how many blocks of data the query read. Each block is 8 kilobytes (KB). `shared hit` counts blocks found in memory, and `read` counts blocks read from disk.
 - **`Planning Time` and `Execution Time`.** Compare these two lines at the bottom of the plan. They show how long PostgreSQL spent choosing the plan and running it.
 
-Use these parts to judge a query plan. A healthy plan reads the chunks that hold the time range the query asks for, spends less time planning than executing, and removes few rows with a filter. An unhealthy plan diverges from these characteristics in some way. Each of the case studies in this tutorial features a different type of unhealthy query plan and shows how to fix it.
+Use these parts to judge a query plan. A healthy plan reads the chunks that hold the time range the query asks for, spends less time planning than executing, and removes minimal rows with a filter. An unhealthy plan diverges from these characteristics in some way. Each of the case studies in this tutorial features a different type of unhealthy query plan and shows how to fix it.
 
 ## Case 1: Fix a date filter that reads every chunk
 
@@ -318,7 +318,7 @@ Execution Time: 96.783 ms
 Look for three problems in the plan.
 
 - It has a chunk line for every chunk in the table, even though yesterday's readings sit in one chunk.
-- Every chunk line has `Rows Removed by Filter`, because PostgreSQL reads every temperature reading for `machine3` and discards the ones from other days.
+- Every chunk line has `Rows Removed by Filter` because PostgreSQL reads every temperature reading for `machine3` and discards the ones from other days.
 - The buffer count is far higher than the plan in the previous section.
 
 TimescaleDB skips a chunk by comparing the query's filter on `time` with the time range the chunk holds. The filter `time::date = current_date - 1` compares a value calculated from `time`, so TimescaleDB can't compare it with a chunk's range and has to include every chunk.
@@ -371,7 +371,7 @@ Execution Time: 0.057 ms
 
 ### Symptom
 
-A dashboard panel shows power consumption for `machine1` since midnight, and it refreshes every few seconds. Its query calculates the start of the day from `now()`. The query returns few rows, and most of its time goes to planning.
+A dashboard panel shows power consumption for `machine1` since midnight, and it refreshes every few seconds. Its query calculates the start of the day from `now()`. The query returns minimal rows, and most of its time goes to planning.
 
 ### Diagnosis
 
@@ -751,7 +751,7 @@ OFFSET 1
 LIMIT 1;
 ```
 
-Verify that a week of data needs only a small amount of index space, well inside the guideline even on a small service.
+Verify that a week of data needs only a small amount of index space, well within the guideline even on a small service.
 
 ```
       chunk_name       | index_size
@@ -760,7 +760,7 @@ Verify that a week of data needs only a small amount of index space, well inside
 (1 row)
 ```
 
-This dataset adds few rows each week, so the seven-day interval of `sensor_data` fits the guideline with room to spare. Changing the interval of an existing hypertable with [`set_chunk_time_interval()`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/set_chunk_time_interval) affects only chunks created afterward. To change the interval of existing data, copy it into a table created with the new interval, the way you created `sensor_data_daily`.
+This dataset adds minimal rows each week, so the seven-day interval of `sensor_data` fits the guideline with room to spare. Changing the interval of an existing hypertable with [`set_chunk_time_interval()`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/set_chunk_time_interval) affects only chunks created afterward. To change the interval of existing data, copy it into a table created with the new interval, the way you created `sensor_data_daily`.
 
 ### Confirm
 
@@ -946,7 +946,7 @@ Execution Time: 2.220 ms
 
 ## Troubleshooting and decision tree
 
-Use this flowchart to troubleshoot a slow hypertable query. Each end point names the case in this tutorial that covers the fix.
+Use this flowchart to troubleshoot a slow hypertable query. Each endpoint names the case in this tutorial that covers the fix.
 
 ```mermaid
 flowchart TD
