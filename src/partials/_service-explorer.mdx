@@ -7,6 +7,10 @@ import imgTigerConsoleColumstoreDataSavingsLight from "../assets/images/deploy/t
 import imgTigerConsoleColumstoreDataSavingsDark from "../assets/images/deploy/tiger-cloud/tiger-console-columstore-data-savings-dark.png";
 import imgTigerConsoleServiceExplorerCaggsLight from "../assets/images/deploy/tiger-cloud/tiger-console-service-explorer-caggs.png";
 import imgTigerConsoleServiceExplorerCaggsDark from "../assets/images/deploy/tiger-cloud/tiger-console-service-explorer-caggs-dark.png";
+import imgTigerConsoleServiceExplorerColumnstoreLight from "../assets/images/deploy/tiger-cloud/tiger-console-service-explorer-columnstore.png";
+import imgTigerConsoleServiceExplorerColumnstoreDark from "../assets/images/deploy/tiger-cloud/tiger-console-service-explorer-columnstore-dark.png";
+import imgTigerConsoleServiceExplorerQueryLight from "../assets/images/deploy/tiger-cloud/tiger-console-service-explorer-query.png";
+import imgTigerConsoleServiceExplorerQueryDark from "../assets/images/deploy/tiger-cloud/tiger-console-service-explorer-query-dark.png";
 
 {C.SERVICE_SHORT_CAP} explorer in {C.CONSOLE} provides a rich administrative dashboard for
 understanding the state of your database instance. The explorer gives you
@@ -55,6 +59,8 @@ In the `Columnstore` section, you see every {C.HYPERTABLE} and {C.CAGG} alongsid
 
 Sort by `Size`, `Rowstore`, or `Columnstore` to find the objects that gain the most from the {C.COLUMNSTORE}.
 
+<ThemeImage light={imgTigerConsoleServiceExplorerColumnstoreLight} dark={imgTigerConsoleServiceExplorerColumnstoreDark} alt="Service explorer columnstore section" />
+
 In the `Continuous aggregate` section, you can see all your continuous
 aggregates, including top-level information such as their size, whether they are
 configured for real-time aggregation, and their refresh periods.
@@ -101,3 +107,5 @@ You write and run queries directly in the explorer, without leaving the page:
   pane, where you can organize them into folders.
 - Queries you write in the floating [{C.SQL_EDITOR}](/build/data-management/run-queries-from-tiger-console#sql-editor)
   appear in the `scratchpad` tab when you open the explorer.
+
+<ThemeImage light={imgTigerConsoleServiceExplorerQueryLight} dark={imgTigerConsoleServiceExplorerQueryDark} alt="Service explorer query tab" />

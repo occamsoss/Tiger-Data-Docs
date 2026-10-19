@@ -9,6 +9,7 @@ import {
   generateAPIReferenceItems,
   stainlessDocs,
 } from "@stainless-api/docs";
+import type { ReferenceSidebarConfigItem } from "@stainless-api/docs";
 import starlightLlmsTxt from "starlight-llms-txt";
 import sitemap from "@astrojs/sitemap";
 import rehypeBasePath from "./src/plugins/rehype-base-path";
@@ -19,6 +20,74 @@ import { createSitemapSerializer } from "./src/lib/sitemap-lastmod";
 import sentry from "@sentry/astro";
 
 const require = createRequire(import.meta.url);
+
+/**
+ * Stainless labels sidebar entries by capitalising every word of the
+ * stainless.yml key ("Retrieve Replica Sets", "Set Ha", "Vpcs"). House style
+ * is sentence case, with product acronyms kept as acronyms.
+ */
+const NAV_ACRONYMS: Record<string, string> = {
+  ha: "HA",
+  vpc: "VPC",
+  vpcs: "VPCs",
+};
+
+/** Label a method page by its spec summary ("Stop a service") rather than its key ("Stop"). */
+function labelFor(item: ReferenceSidebarConfigItem): string {
+  const summary = item.kind === "method_page" ? item.metadata?.summary : undefined;
+  return sentenceCase(summary?.trim() || item.label);
+}
+
+function sentenceCase(label: string): string {
+  return label
+    .split(" ")
+    .map((word, i) => {
+      const lower = word.toLowerCase();
+      if (NAV_ACRONYMS[lower]) return NAV_ACRONYMS[lower];
+      return i === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+    })
+    .join(" ");
+}
+
+/**
+ * Flatten the generated REST reference sidebar to one level of groups.
+ *
+ * Stainless nests resource groups the way `stainless/stainless.yml` nests
+ * resources (projects > services > metrics > details), which buries most
+ * endpoints two or three levels deep. Hoist every nested group to the top
+ * level, and fold a group with a single method into its parent. Page URLs
+ * are unaffected: they come from the resource tree, not from the sidebar.
+ */
+function flattenApiReferenceSidebar(
+  items: ReferenceSidebarConfigItem[],
+): ReferenceSidebarConfigItem[] {
+  const out: ReferenceSidebarConfigItem[] = [];
+  const visit = (item: ReferenceSidebarConfigItem) => {
+    if (item.kind !== "group") {
+      out.push({ ...item, label: labelFor(item) });
+      return;
+    }
+    const own = item.entries
+      .filter((e) => e.kind !== "group")
+      .map((e) => ({ ...e, label: labelFor(e) }));
+    const nested = item.entries.filter((e) => e.kind === "group");
+    for (const sub of nested) {
+      if (sub.kind === "group" && sub.entries.length === 1 && sub.entries[0].kind !== "group") {
+        own.push({ ...sub.entries[0], label: labelFor(sub.entries[0]) });
+      }
+    }
+    if (own.length > 0) {
+      out.push({ ...item, label: sentenceCase(item.label), entries: own, collapsed: true });
+    }
+    for (const sub of nested) {
+      if (sub.kind === "group" && !(sub.entries.length === 1 && sub.entries[0].kind !== "group")) {
+        visit(sub);
+      }
+    }
+  };
+  items.forEach(visit);
+  return out;
+}
 
 // Resolve package subpaths so aliasing the main "components" entry doesn't break ThemeSelect/SDKSelect.
 const docsComponentsScriptsPath = require.resolve("@stainless-api/docs/components/scripts");
@@ -33,7 +102,7 @@ const docsComponentsScriptsPath = require.resolve("@stainless-api/docs/component
  * 2) Plugins such as `@vitejs/plugin-react` may delete `transform` in `configResolved`
  *    after Vite has cached which plugins expose `transform`, so `getHookHandler` returns
  *    undefined and handler.call() throws (upstream: vitejs/vite#21162). We ship a pnpm
- *    patch for `vite@7.3.1` (`patches/vite@7.3.1.patch`) that skips when `!handler`.
+ *    patch for `vite@7.3.5` (`patches/vite@7.3.5.patch`) that skips when `!handler`.
  */
 const HOOK_NAMES = ["transform", "load", "resolveId"] as const;
 const noopHandlers: Record<(typeof HOOK_NAMES)[number], () => null> = {
@@ -188,12 +257,6 @@ function withBase(redirects: Record<string, string>): Record<string, string> {
   );
 }
 
-// ESM dynamic import: starlight-links-validator ships TypeScript; `require()` fails on Node 22+
-// ("Stripping types is currently unsupported for files under node_modules").
-const starlightLinksValidator = process.env.CHECK_LINKS
-  ? (await import("starlight-links-validator")).default
-  : null;
-
 // https://astro.build/config
 export default defineConfig({
   site: 'https://www.tigerdata.com',
@@ -240,7 +303,7 @@ export default defineConfig({
         llmsTxt: { disabled: true },
         propertySettings: {
           collapseDescription: false,
-          expandDepth: 2,
+          expandDepth: 0,
         },
       },
       title: "Tiger Data Docs",
@@ -340,17 +403,7 @@ export default defineConfig({
           } as Record<string, string>,
           /** Single-link sidebar groups become one clickable row (see `src/starlight-route-middleware.ts`). */
           routeMiddleware: ["./src/starlight-route-middleware.ts"],
-          plugins: [
-              starlightLlmsTxt(),
-              ...(starlightLinksValidator
-                ? [starlightLinksValidator({
-                    // The Tiger Cloud REST API reference is auto-generated by the
-                    // Stainless docs integration and only exists when STAINLESS_API_KEY
-                    // is set. Exclude its paths so lint:links passes without the key.
-                    exclude: ["/reference/tiger-cloud-rest/**", "/files/**"],
-                  })]
-                : []),
-            ],
+          plugins: [starlightLlmsTxt()],
         },
       },
       tabs: [
@@ -859,6 +912,7 @@ export default defineConfig({
                   items: [
                     { label: "Overview", link: "/integrate/bi-vizualization" },
                     { label: "Cube", link: "/integrate/bi-vizualization/cube" },
+                    { label: "Metabase", link: "/integrate/bi-vizualization/metabase" },
                     { label: "Mode Analytics", link: "/integrate/bi-vizualization/mode" },
                     { label: "Power BI", link: "/integrate/bi-vizualization/power-bi" },
                     { label: "Retool", link: "/integrate/bi-vizualization/retool" },
@@ -917,6 +971,7 @@ export default defineConfig({
                     { label: "Overview", link: "/integrate/query-administration" },
                     { label: "Azure Data Studio", link: "/integrate/query-administration/azure-data-studio" },
                     { label: "DBeaver", link: "/integrate/query-administration/dbeaver" },
+                    { label: "LibreDB Studio", link: "/integrate/query-administration/libredb-studio" },
                     { label: "pgAdmin", link: "/integrate/query-administration/pgadmin" },
                     { label: "PostgreSQL", link: "/integrate/query-administration/postgresql" },
                     { label: "psql", link: "/integrate/query-administration/psql" },
@@ -965,12 +1020,12 @@ export default defineConfig({
               label: "Industry",
               collapsed: true,
               items: [
-                { label: "Oil and gas", link: "/integrate/?industry=oil-and-gas" },
-                { label: "IoT", link: "/integrate/?industry=iot" },
-                { label: "Energy", link: "/integrate/?industry=energy" },
-                { label: "Crypto", link: "/integrate/?industry=crypto" },
-                { label: "Healthcare", link: "/integrate/?industry=healthcare" },
-                { label: "Manufacturing", link: "/integrate/?industry=manufacturing" },
+                { label: "Oil and gas", link: "/integrate?industry=oil-and-gas" },
+                { label: "IoT", link: "/integrate?industry=iot" },
+                { label: "Energy", link: "/integrate?industry=energy" },
+                { label: "Crypto", link: "/integrate?industry=crypto" },
+                { label: "Healthcare", link: "/integrate?industry=healthcare" },
+                { label: "Manufacturing", link: "/integrate?industry=manufacturing" },
               ],
             },
             // --- Platform (matches integrationPlatforms) ---
@@ -978,9 +1033,9 @@ export default defineConfig({
               label: "Platform",
               collapsed: true,
               items: [
-                { label: "Tiger Cloud on AWS", link: "/integrate/?platform=aws" },
-                { label: "Tiger Cloud on Azure", link: "/integrate/?platform=azure" },
-                { label: "Self-Hosted", link: "/integrate/?platform=self-hosted" },
+                { label: "Tiger Cloud on AWS", link: "/integrate?platform=aws" },
+                { label: "Tiger Cloud on Azure", link: "/integrate?platform=azure" },
+                { label: "Self-Hosted", link: "/integrate?platform=self-hosted" },
               ],
             },
             // --- First Party / Third Party ---
@@ -988,8 +1043,8 @@ export default defineConfig({
               label: "First party/third party",
               collapsed: true,
               items: [
-                { label: "First party", link: "/integrate/?party=first-party" },
-                { label: "Third party", link: "/integrate/?party=third-party" },
+                { label: "First party", link: "/integrate?party=first-party" },
+                { label: "Third party", link: "/integrate?party=third-party" },
               ],
             },
             // --- Technology ---
@@ -997,18 +1052,18 @@ export default defineConfig({
               label: "Technology",
               collapsed: true,
               items: [
-                { label: "PostgreSQL", link: "/integrate/?technology=PostgreSQL" },
-                { label: "Python", link: "/integrate/?technology=Python" },
-                { label: "SQL", link: "/integrate/?technology=SQL" },
-                { label: "Kafka", link: "/integrate/?technology=Kafka" },
-                { label: "AWS", link: "/integrate/?technology=AWS" },
-                { label: "Azure", link: "/integrate/?technology=Azure" },
-                { label: "GCP", link: "/integrate/?technology=GCP" },
-                { label: "Terraform", link: "/integrate/?technology=Terraform" },
-                { label: "Kubernetes", link: "/integrate/?technology=Kubernetes" },
-                { label: "Grafana", link: "/integrate/?technology=Grafana" },
-                { label: "Prometheus", link: "/integrate/?technology=Prometheus" },
-                { label: "REST API", link: "/integrate/?technology=REST+API" },
+                { label: "AWS", link: "/integrate?technology=AWS" },
+                { label: "Azure", link: "/integrate?technology=Azure" },
+                { label: "GCP", link: "/integrate?technology=GCP" },
+                { label: "Grafana", link: "/integrate?technology=Grafana" },
+                { label: "Kafka", link: "/integrate?technology=Kafka" },
+                { label: "Kubernetes", link: "/integrate?technology=Kubernetes" },
+                { label: "PostgreSQL", link: "/integrate?technology=PostgreSQL" },
+                { label: "Prometheus", link: "/integrate?technology=Prometheus" },
+                { label: "Python", link: "/integrate?technology=Python" },
+                { label: "REST API", link: "/integrate?technology=REST+API" },
+                { label: "SQL", link: "/integrate?technology=SQL" },
+                { label: "Terraform", link: "/integrate?technology=Terraform" },
               ],
             },
             {
@@ -1949,9 +2004,10 @@ export default defineConfig({
                 {
                   label: "Tiger Cloud REST API",
                   collapsed: true,
-                  items: generateAPIReferenceItems({
-                    excludeResourceOverviewPages: true,
-                  }),
+                  items: generateAPIReferenceItems(
+                    { excludeResourceOverviewPages: true },
+                    flattenApiReferenceSidebar,
+                  ),
                 },
                 {
                   label: "Data tiering",

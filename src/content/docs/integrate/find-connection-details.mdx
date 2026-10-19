@@ -112,6 +112,7 @@ Once you have these, connect using any {C.PG} client. Find the connection method
 </Tabs>
 
 <TestPlan>
+target: cloud
 
 1. click `Settings`
 2. expect enabled `Create credentials`
@@ -125,6 +126,13 @@ Not scripted:
 
 - Find your project and service ID: the switcher arrows and the dots are unnamed.
 - Create client credentials past `Create credentials`: the client-credentials page's plan does it.
-- Self-hosted and MST tabs: no Console, no MST account.
+- MST tab: no MST account.
+
+</TestPlan>
+
+<TestPlan>
+target: self-hosted
+
+Nothing to run: the self-hosted tab is prose with no procedure.
 
 </TestPlan>
