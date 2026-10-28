@@ -483,6 +483,7 @@ export default defineConfig({
                 { label: "Visualize financial tick data with Grafana", link: "/learn/tutorials/analyze-financial-tick-data" },
                 { label: "Visualize transport and geospatial data with Grafana", link: "/learn/tutorials/analyze-transport-data" },
                 { label: "Tiger Data cookbook", link: "/learn/tutorials/cookbook" },
+                { label: "Upgrade PostgreSQL major versions on a TimescaleDB database", link: "/learn/tutorials/upgrade-postgresql-major-versions" },
               ],
             },
             {
