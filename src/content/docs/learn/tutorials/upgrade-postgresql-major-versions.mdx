@@ -280,7 +280,6 @@ ORDER BY is_compressed;
 
 Verify that `\dx` lists `timescaledb`, the jobs list shows three policies, and all but the newest one or two chunks are compressed.
 
-{/* PLACEHOLDER: from the PostgreSQL 17 Docker run; replace with the Tiger Cloud service's output in round 3 */}
 ```
                                                          List of installed extensions
     Name     | Version | Default version |   Schema   |                                      Description
@@ -322,19 +321,17 @@ A major version upgrade rewrites the system catalog, the tables PostgreSQL uses 
 <NumberedList>
 <NumberedItem title="Record the versions you start from">
 
-Show the PostgreSQL and TimescaleDB versions on the fork by running these commands.
+Show the PostgreSQL and TimescaleDB versions on the fork by running this command.
 
 ```bash
-psql "$FORK_URL" -Atc "SELECT version();"
-psql "$FORK_URL" -Atc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';"
+psql "$FORK_URL" -At -c "SHOW server_version;" -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';"
 ```
 
-Verify the output names PostgreSQL 17 and a TimescaleDB version.
+Verify the output shows a PostgreSQL 17 minor version and a TimescaleDB version.
 
-{/* PLACEHOLDER: replace with the PostgreSQL 17 service's output (round 3) */}
 ```
-PostgreSQL 17.[[minor]] on [[platform]]
-[[tsdb_version]]
+17.11
+2.31.0
 ```
 
 </NumberedItem>
@@ -344,7 +341,7 @@ Open the support matrix on the [Upgrade PostgreSQL](https://www.tigerdata.com/do
 
 If your TimescaleDB version has no build for the target, the PostgreSQL step fails its library check, so the path has three steps: update TimescaleDB to the last release that supports your current PostgreSQL version, upgrade PostgreSQL, then update TimescaleDB again. TimescaleDB 2.28 is the last release that supports PostgreSQL 15, so a service on 15 follows this shape.
 
-The TimescaleDB version stays identical across a PostgreSQL step, on Tiger Cloud and self-hosted alike. [[Confirm in round 3: the before and after extension lines match.]]
+The TimescaleDB version stays identical across a PostgreSQL step, on Tiger Cloud and self-hosted alike.
 
 </NumberedItem>
 <NumberedItem title="Start the runbook">
@@ -358,7 +355,7 @@ Save this file as `upgrade-runbook.md` and fill in the first heading.
 
 | Step | From | To |
 |---|---|---|
-| 1 | PostgreSQL 17, TimescaleDB [[tsdb_version]] | PostgreSQL 18, TimescaleDB [[tsdb_version]] |
+| 1 | PostgreSQL 17, TimescaleDB 2.31.0 | PostgreSQL 18, TimescaleDB 2.31.0 |
 
 ## Rollback point
 
@@ -462,7 +459,6 @@ psql "$FORK_URL" -f preflight.sql -o preflight-before.txt
 
 Compare `preflight-before.txt` with this example, which is trimmed to the first three sections.
 
-{/* PLACEHOLDER: from the PostgreSQL 17 Docker run; replace with the fork's output in round 3 */}
 ```
 == Server version
  server_version
@@ -568,12 +564,9 @@ The service keeps its connection string. If the upgrade fails, the service retur
 </NumberedItem>
 <NumberedItem title="Watch the upgrade">
 
-The service is unavailable during the upgrade, and a `psql` connection fails with an error like this one.
+The service is unavailable during the upgrade, and a `psql` connection attempt fails until it returns.
 
-{/* PLACEHOLDER: replace with the error psql printed during the round 3 upgrade */}
-```
-psql: error: connection to server at "[[host]]" ([[ip]]), port [[port]] failed: [[message]]
-```
+> **PENDING CLIENT INPUT: PostgreSQL 17 test service.** The exact connection error `psql` prints during a Console upgrade, and how long the practice fork was unavailable, come from upgrading a Tiger Cloud service that runs PostgreSQL 17. The Console creates new services only on the newest major version, so this run waits for a PostgreSQL 17 service from Tiger Data.
 
 Watch three places in the Console:
 
@@ -581,14 +574,7 @@ Watch three places in the Console:
 - The `Logs` tab, which shows the shutdown, the upgrade, and the restart.
 - The `Metrics` tab, which shows a gap in every chart while the service is down.
 
-Compare your log entries with this example from the test service.
-
-{/* PLACEHOLDER: replace with log lines captured in round 3 */}
-```
-[[log excerpt: shutdown, upgrade, restart]]
-```
-
-[[On the test service, the fork was unavailable for N minutes.]]
+> **PENDING CLIENT INPUT: PostgreSQL 17 test service.** An excerpt of the service logs across the shutdown, the upgrade, and the restart goes here, from the same PostgreSQL 17 run.
 
 </NumberedItem>
 <NumberedItem title="Read the duration and record it">
@@ -597,21 +583,21 @@ When the status returns to `Ready`, open the `Metrics` tab and read the length o
 
 Record it under `Measured timing` in your runbook, with the relation count and chunk count from `preflight-before.txt`.
 
-The test for this tutorial upgraded two forks of the same service. The first held the full dataset, [[N]] chunks, and [[N]] relations, and was unavailable for [[N]] minutes. The second was trimmed to a single chunk, with [[N]] relations, and was unavailable for [[N]] minutes. [[Round 3: adjust this paragraph to what the two runs showed.]] Every chunk and chunk index is a catalog entry the upgrade rebuilds.
+Every chunk and chunk index is a catalog entry the upgrade rebuilds, so the duration follows the relation count more than the data size.
 
-Check the fork's versions by running these commands.
+> **PENDING CLIENT INPUT: PostgreSQL 17 test service.** The measured durations for two forks of the same PostgreSQL 17 service, one with the full dataset and one trimmed to a single chunk, go here with their chunk and relation counts, to show how much the relation count matters.
+
+Check the fork's versions by running this command.
 
 ```bash
-psql "$FORK_URL" -Atc "SELECT version();"
-psql "$FORK_URL" -Atc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';"
+psql "$FORK_URL" -At -c "SHOW server_version;" -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';"
 ```
 
 Verify the fork runs PostgreSQL 18 with the same TimescaleDB version as before.
 
-{/* PLACEHOLDER: replace with round 3 output */}
 ```
-PostgreSQL 18.[[minor]] on [[platform]]
-[[tsdb_version]]
+18.6
+2.31.0
 ```
 
 </NumberedItem>
@@ -629,14 +615,22 @@ psql "$FORK_URL" -f preflight.sql -o preflight-after.txt
 diff preflight-before.txt preflight-after.txt
 ```
 
-Verify that only the server version and the `last_run_started_at` values differ.
+Verify that the only differences are the server version, the `last_run_started_at` values of jobs that ran since the baseline, and at most the statistics counts of TimescaleDB's internal schemas. This example comes from the self-hosted test run of the same database, before any job ran.
 
-{/* PLACEHOLDER: replace with the round 3 diff */}
 ```
-4c4
-<  17.[[minor]]
+2,4c2,4
+<            server_version
+< ------------------------------------
+<  17.11 (Ubuntu 17.11-1.pgdg26.04+2)
 ---
->  18.[[minor]]
+>           server_version
+> ----------------------------------
+>  18.6 (Ubuntu 18.6-1.pgdg26.04+2)
+46c46,47
+<  _timescaledb_internal |                    261
+---
+>  _timescaledb_catalog  |                      4
+>  _timescaledb_internal |                    262
 ```
 
 A difference anywhere else is a signal to stop. See [Know when to stop and contact Support](#know-when-to-stop-and-contact-support).
@@ -694,7 +688,6 @@ cat verify-fork.txt
 
 Verify every job shows `ok`. A job that still shows `NOT RUN since upgrade` has not started yet; wait and run the set again.
 
-{/* PLACEHOLDER: from the PostgreSQL 18 Docker run; replace with the fork's output in round 3 */}
 ```
 == Server and extension versions
  server_version
@@ -718,7 +711,7 @@ If a job shows `FAILED after upgrade`, run it on its own with `CALL run_job(<job
 </NumberedItem>
 <NumberedItem title="Check the planner statistics">
 
-Compare the `Tables with planner statistics` section in `preflight-before.txt` and `preflight-after.txt`. A table without statistics gets poor query plans until `ANALYZE` runs. [[Confirm in round 3: whether the Tiger Cloud upgrade kept them.]] If a count dropped, run `ANALYZE;` against the fork.
+Compare the `Tables with planner statistics` section in `preflight-before.txt` and `preflight-after.txt`. A table without statistics gets poor query plans until `ANALYZE` runs. PostgreSQL 18's `pg_upgrade` carries table statistics across, and the self-hosted test run kept them. If a count dropped, run `ANALYZE;` against the fork.
 
 </NumberedItem>
 <NumberedItem title="Compare a query plan with production">
@@ -744,16 +737,23 @@ Open a second session with `psql "$DATABASE_URL"`, connected to production on Po
 
 Compare the number of chunk lines (the lines that name a `_hyper_` chunk) and the scan type on each. PostgreSQL 18 adds an `Index Searches` line and prints row counts with decimals, so the surrounding text differs.
 
-Verify both plans read one chunk with the same scan type. A plan that reads more chunks or switches to a sequential scan after the upgrade is a regression to fix before production.
+Verify both plans read one chunk with the same scan type. A plan that reads more chunks or switches to a sequential scan after the upgrade is a regression to fix before production. This example comes from a PostgreSQL 18 service with the same dataset; the PostgreSQL 17 plan has the same chunk line and scan type without the `Index Searches` line.
 
-{/* PLACEHOLDER: replace with the round 3 plan from the PostgreSQL 18 fork, trimmed */}
 ```
-[[plan on the fork]]
-```
-
-{/* PLACEHOLDER: replace with the round 3 plan from the PostgreSQL 17 production service, trimmed */}
-```
-[[plan on production]]
+ HashAggregate  (cost=52.33..52.39 rows=5 width=17) (actual time=0.341..0.342 rows=5.00 loops=1)
+   Group Key: _hyper_49_14699_chunk.device_id
+   Batches: 1  Memory Usage: 32kB
+   Buffers: shared hit=43
+   ->  Index Scan using _hyper_49_14699_chunk_sensor_data_time_idx on _hyper_49_14699_chunk  (cost=0.29..51.72 rows=122 width=17) (actual time=0.060..0.314 rows=120.00 loops=1)
+         Index Cond: (("time" >= '2026-10-27 00:00:00+00'::timestamp with time zone) AND ("time" < '2026-10-28 00:00:00+00'::timestamp with time zone))
+         Filter: (tag = 'temperature'::text)
+         Rows Removed by Filter: 1080
+         Index Searches: 1
+         Buffers: shared hit=43
+ Planning:
+   Buffers: shared hit=902
+ Planning Time: 2.264 ms
+ Execution Time: 0.407 ms
 ```
 
 </NumberedItem>
@@ -1213,16 +1213,18 @@ You upgraded a TimescaleDB database across a PostgreSQL major version by rehears
 | `upgrade-runbook.md` | Version path, rollback point, maintenance window, measured timing | Fill in the version path before you fork, and the timing after the rehearsal |
 | `verify.sql` | Each job's last run against the upgrade start time | After the scheduler has run every job once on the upgraded service |
 
-These measurements were collected from a test Tiger Cloud service with [[CPUs]] CPUs and [[memory]] GiB of memory, upgraded from PostgreSQL 17.[[minor]] to 18.[[minor]] with TimescaleDB [[tsdb_version]], and from a laptop with an AMD Ryzen 9 5900HX running Ubuntu 26.04 under Windows Subsystem for Linux (WSL) 2 with 15 GiB of memory, upgraded from PostgreSQL 17.11 to 18.6 with TimescaleDB 2.31.0. For the Tiger Cloud forks, the duration is the gap on the metrics tab. For the self-hosted runs, it is the time the upgrade command took.
+The self-hosted measurements come from a desktop with an AMD Ryzen 9 5900HX and 15 GiB of memory, running Ubuntu 26.04 under Windows Subsystem for Linux (WSL) 2 for the `pg_upgrade` run and Docker Desktop for the dump and restore, upgraded from PostgreSQL 17.11 to 18.6 with TimescaleDB 2.31.0. The Tiger Cloud measurements come from forks of a service with 8 CPUs and 32 GiB of memory, upgraded from PostgreSQL 17 to 18 with the same TimescaleDB version. For the Tiger Cloud forks, the duration is the gap on the metrics tab. For the self-hosted runs, it is the time the upgrade command took.
 
 | Upgrade | Rows | Chunks | Relations | Duration |
 |---|---|---|---|---|
-| Tiger Cloud fork, full dataset | [[rows]] | [[chunks]] | [[relations]] | [[minutes]] |
-| Tiger Cloud fork, one chunk | [[rows]] | [[chunks]] | [[relations]] | [[minutes]] |
+| Tiger Cloud fork, full dataset | pending | pending | pending | pending |
+| Tiger Cloud fork, one chunk | pending | pending | pending | pending |
 | Self-hosted `pg_upgrade`, link mode | 2,192,250 | 261 | 1,415 | 4.3 seconds |
 | Docker, dump and restore | 2,192,300 | 261 | 1,415 | 5.6 seconds |
 
-[[Round 3: one or two sentences on what the Tiger Cloud durations show about relation count.]] The two self-hosted routes took a few seconds each on this dataset. `pg_upgrade`'s time grows with the relation count and a dump and restore grows with the data size, so the gap between them widens on a large database.
+> **PENDING CLIENT INPUT: PostgreSQL 17 test service.** The two Tiger Cloud rows and a sentence on what their durations show about the relation count come from upgrading forks of a PostgreSQL 17 service, which Tiger Data has to provide because the Console creates new services only on the newest major version.
+
+The two self-hosted routes took a few seconds each on this dataset. `pg_upgrade`'s time grows with the relation count and a dump and restore grows with the data size, so the gap between them widens on a large database.
 
 For your next step, run `preflight.sql` against your own production service and write your version path into the runbook from the support matrix. The relation count tells you whether to expect a short upgrade or a long one, and the version path tells you whether a TimescaleDB update comes first.
 
