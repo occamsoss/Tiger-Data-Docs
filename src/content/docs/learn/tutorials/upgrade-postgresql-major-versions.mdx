@@ -5,7 +5,7 @@ description: Plan, rehearse, and run a PostgreSQL major version upgrade on Tiger
 
 import { NumberedList, NumberedItem } from "@components/NumberedList";
 
-This tutorial shows you how to upgrade a Tiger Cloud service from PostgreSQL 17 to PostgreSQL 18. You plan the version path, run a pre-flight checklist, rehearse the upgrade on a fork and measure its unavailable window, verify the fork, then upgrade production and verify it the same way. A separate section covers the same upgrade on a self-hosted installation with `pg_upgrade`, and in Docker. You keep a pre-flight script, a runbook, and a verification query set for next time.
+This tutorial shows you how to upgrade a Tiger Cloud service from PostgreSQL 17 to 18. You will plan the version path, run a pre-flight checklist, rehearse the upgrade on a fork and measure its unavailable window, verify the fork, then upgrade production and verify it the same way. A separate section covers the same upgrade on a self-hosted installation with `pg_upgrade` and in Docker. By the end, you'll have a pre-flight script, a runbook, and a verification query to reuse for your next upgrade.
 
 If you want an overview of how Tiger Cloud handles maintenance first, see [Maintenance and upgrades](https://www.tigerdata.com/docs/deploy/tiger-cloud/tiger-cloud-aws/upgrades).
 
@@ -16,29 +16,31 @@ If you want an overview of how Tiger Cloud handles maintenance first, see [Maint
 - How to verify extensions, policies, continuous aggregates, and jobs after the upgrade, on Tiger Cloud and on a self-hosted installation.
 - Which signals mean stop and contact Support, and how to roll back to the service you had before.
 
-## Set up the data
+## Prepare the service
 
 <NumberedList>
 <NumberedItem title="Start from a Tiger Cloud service on PostgreSQL 17 or earlier">
 
-New services come up on the newest PostgreSQL major version, so the service you upgrade is one you already have. Open it in Tiger Console and click `Operations` > `Service upgrades`. The page shows the current and latest version of PostgreSQL and of TimescaleDB, and an `Upgrade service` button when a newer PostgreSQL version is available.
+New services come with the newest PostgreSQL major version by default, so you must start with an existing service. Check whether you can upgrade your service by opening it in Tiger Console and clicking `Operations` > `Service upgrades`. The page shows the current and latest version of PostgreSQL and of TimescaleDB, and an `Upgrade service` button when a newer PostgreSQL version is available.
 
 > **Note:** You can also follow this tutorial with a self-hosted TimescaleDB installation on PostgreSQL 17. Follow the setup, planning, and pre-flight sections here, then continue in [Upgrade a self-hosted instance](#upgrade-a-self-hosted-instance).
 
 </NumberedItem>
 <NumberedItem title="Connect to your service">
 
-Save your connection string in the `DATABASE_URL` environment variable and connect with these commands. Later scripts read `DATABASE_URL`.
+Save your connection string in the `DATABASE_URL` environment variable and connect with these commands.
 
 ```bash
 export DATABASE_URL="<connection string>"
 psql "$DATABASE_URL"
 ```
 
+Later scripts rely on `DATABASE_URL` to run properly.
+
 </NumberedItem>
 <NumberedItem title="Check what the service already holds">
 
-List the extensions, the policy jobs, and the hypertables by running this SQL. Jobs you create have ids from 1000 upward.
+List the extensions, the policy jobs, and the hypertables by running this SQL.
 
 ```sql
 \dx
@@ -60,12 +62,12 @@ If the output shows a hypertable with chunks, at least one policy job, and a con
 
 ### Load the sample dataset
 
-Follow these steps on a test service that has no hypertable, continuous aggregate, or policies. They load a sample manufacturing dataset with hourly readings from ten sensors on each of five factory machines, over ten years, about 4.4 million records in total. On a production service, skip this subsection.
+Follow these steps on a test service that has no hypertable, continuous aggregate, or policies. Skip this subsection if you're using a production service.
 
 <NumberedList>
 <NumberedItem title="Create the hypertable">
 
-Create the `sensor_data` hypertable with weekly chunks, the columnstore off, and an index for queries that filter on a machine, a sensor, and a time range, by running this SQL in your `psql` session.
+Create the `sensor_data` hypertable by running this SQL in your `psql` session.
 
 ```sql
 CREATE TABLE sensor_data (
@@ -87,7 +89,7 @@ CREATE INDEX sensor_data_device_tag_time_idx
     ON sensor_data (device_id, tag, time DESC);
 ```
 
-The columnstore stays off until Step 3 so no background job converts chunks while the loading script runs.
+The table uses weekly chunks and has an index for queries that filter on a machine, a sensor, and a time range. The columnstore stays off until Step 3, so no background job converts chunks while the loading script runs.
 
 </NumberedItem>
 <NumberedItem title="Load the manufacturing dataset">
@@ -199,7 +201,7 @@ Loaded 4,380,050 rows into sensor_data.
 </NumberedItem>
 <NumberedItem title="Add a continuous aggregate and three policies">
 
-Reconnect with `psql`. Update the planner statistics, create a daily continuous aggregate, and add a policy that refreshes the most recent 30 days every hour, by running this SQL.
+Reconnect with `psql`. Update the planner statistics, create a daily continuous aggregate, and add a policy that refreshes the most recent 30 days every hour by running this SQL.
 
 ```sql
 ANALYZE sensor_data;
@@ -222,7 +224,7 @@ SELECT add_continuous_aggregate_policy('sensor_data_daily',
     schedule_interval => INTERVAL '1 hour');
 ```
 
-Add a retention policy that drops chunks older than five years, then turn on the columnstore with a policy that converts chunks older than one week, by running this SQL.
+Add a retention policy that drops chunks older than five years, then turn on the columnstore with a policy that converts chunks older than one week by running this SQL.
 
 ```sql
 SELECT add_retention_policy('sensor_data',
@@ -304,19 +306,21 @@ Verify that `\dx` lists `timescaledb`, the jobs list shows three policies, and a
 
 ### Fork the service
 
-In Tiger Console, open the service and click `Operations` > `Service management` > `Fork service`. On the `Fork a service` page, leave `Compute` at the service's own size, so the fork's upgrade time predicts production, give the fork a name such as `practice-fork` under `Service name`, and click `Fork service`. A fork takes several minutes and appears in `Services` with a `Forked from` label and the status `Ready` when it is done.
+In Tiger Console, open the service and click `Operations` > `Service management` > `Fork service`. On the `Fork a service` page, leave `Compute` at the service's own size so the fork's upgrade time predicts production, give the fork a name such as `practice-fork` under `Service name`, and click `Fork service`. A fork takes several minutes and appears in `Services` with a `Forked from` label and the status `Ready` when it is done.
 
 ![The Fork a service page in Tiger Console](fork-service.png)
 
-Download the fork's configuration file and save its connection string with this command. Every step from here to [Upgrade production](#upgrade-production) runs against the fork.
+Download the fork's configuration file and save its connection string with this command.
 
 ```bash
 export FORK_URL="<fork connection string>"
 ```
 
+Every step from here to [Upgrade production](#upgrade-production) runs against the fork.
+
 ## Plan the version path
 
-A major version upgrade rewrites the system catalog, the tables PostgreSQL uses to describe every other table, index, and extension. `pg_upgrade` rebuilds the catalog entry for every relation and leaves the data files in place, so its running time follows the number of relations more than the data size. The catalog also names the version of every installed extension, and the new server must have that exact version installed. A version path is the sequence of PostgreSQL steps and TimescaleDB steps that keeps the two compatible throughout.
+A version path is the sequence of PostgreSQL steps and TimescaleDB steps that keeps the two compatible throughout.
 
 <NumberedList>
 <NumberedItem title="Record the versions you start from">
@@ -339,9 +343,9 @@ Verify the output shows a PostgreSQL 17 minor version and a TimescaleDB version.
 
 Open the support matrix on the [Upgrade PostgreSQL](https://www.tigerdata.com/docs/self-hosted/latest/upgrades/upgrade-pg) page and find your TimescaleDB version's row. If it supports both the PostgreSQL version you run and the one you want, your path is one PostgreSQL step. Every current TimescaleDB release supports PostgreSQL 16, 17, and 18, so 17 to 18 takes one step.
 
-If your TimescaleDB version has no build for the target, the PostgreSQL step fails its library check, so the path has three steps: update TimescaleDB to the last release that supports your current PostgreSQL version, upgrade PostgreSQL, then update TimescaleDB again. TimescaleDB 2.28 is the last release that supports PostgreSQL 15, so a service on 15 follows this shape.
+If your TimescaleDB version has no build for the target, the path has three steps: update TimescaleDB to the last release that supports your current PostgreSQL version, upgrade PostgreSQL, then update TimescaleDB again. TimescaleDB 2.28 is the last release that supports PostgreSQL 15, so a service on 15 follows this shape.
 
-The TimescaleDB version stays identical across a PostgreSQL step, on Tiger Cloud and self-hosted alike.
+The TimescaleDB version stays identical across a PostgreSQL step, on Tiger Cloud and self-hosted alike, because the new server has to load the exact extension version the old catalog names.
 
 </NumberedItem>
 <NumberedItem title="Start the runbook">
@@ -374,7 +378,7 @@ Verify your runbook lists each step of your path as a pair of versions, with the
 <NumberedList>
 <NumberedItem title="Save the pre-flight script">
 
-Save this script as `preflight.sql`. It records everything the upgrade could change. The two `\gexec` blocks build a query that covers every continuous aggregate and every hypertable, so it needs no edits for your own schema.
+Save this script as `preflight.sql`.
 
 ```sql
 -- preflight.sql: inventory a TimescaleDB database before and after
@@ -448,6 +452,8 @@ WHERE relnamespace::regnamespace::text
       NOT IN ('pg_catalog', 'information_schema', 'pg_toast');
 ```
 
+The script records everything the upgrade could change. The two `\gexec` blocks build a query that covers every continuous aggregate and every hypertable, so it needs no edits for your own schema.
+
 </NumberedItem>
 <NumberedItem title="Run the script against the fork and save the baseline">
 
@@ -483,7 +489,7 @@ Compare `preflight-before.txt` with this example, which is trimmed to the first 
 </NumberedItem>
 <NumberedItem title="Export the job settings">
 
-Export every job's settings to a comma-separated values (CSV) file by running this command, on one line, so you can recreate a policy if one goes missing.
+Export every job's settings to a comma-separated values (CSV) file by running this command on one line.
 
 ```bash
 psql "$FORK_URL" -c "\copy (SELECT job_id, application_name, proc_name, schedule_interval, max_runtime, max_retries, retry_period, scheduled, config FROM timescaledb_information.jobs WHERE job_id >= 1000 ORDER BY job_id) TO 'jobs-before.csv' WITH (FORMAT csv, HEADER)"
@@ -495,10 +501,12 @@ Verify the command prints `COPY` followed by the number of jobs.
 COPY 3
 ```
 
+The file holds the settings to recreate a policy if one goes missing.
+
 </NumberedItem>
 <NumberedItem title="Check for a running job">
 
-A job that is running when the server stops starts over after the upgrade. Check for one by running this SQL against the fork.
+Check for a running job by running this SQL against the fork.
 
 ```sql
 SELECT job_id, application_name, job_status, last_run_started_at
@@ -523,6 +531,8 @@ Verify both queries return no rows.
 -----+------------------+-------+-------------
 (0 rows)
 ```
+
+A job that is running when the server stops starts over after the upgrade, which adds to the first post-upgrade run.
 
 If a columnstore job shows `Running`, wait for it to finish, or pause it with [`alter_job()`](https://www.tigerdata.com/docs/reference/timescaledb/jobs-automation/alter_job) and turn it back on after the upgrade. Replace `1002` with the job's `job_id`.
 
@@ -551,11 +561,13 @@ Verify that `preflight-before.txt` and `jobs-before.csv` exist and that `Service
 <NumberedList>
 <NumberedItem title="Note the time and start the upgrade">
 
-Record the current time in Coordinated Universal Time (UTC) by running this command. The verification set uses it.
+Record the current time in Coordinated Universal Time (UTC) by running this command.
 
 ```bash
 date -u +"%Y-%m-%d %H:%M:%S+00"
 ```
+
+The verification set uses this time to tell which jobs ran after the upgrade.
 
 Open the practice fork in Tiger Console and click `Operations` > `Service upgrades`, then `Upgrade service`, and confirm.
 
@@ -633,7 +645,7 @@ Verify that the only differences are the server version, the `last_run_started_a
 >  _timescaledb_internal |                    262
 ```
 
-A difference anywhere else is a signal to stop. See [Know when to stop and contact Support](#know-when-to-stop-and-contact-support).
+Any difference elsewhere is a signal to stop. See [Know when to stop and contact Support](#know-when-to-stop-and-contact-support).
 
 </NumberedItem>
 <NumberedItem title="Run every job and check the results">
@@ -671,13 +683,15 @@ WHERE j.job_id >= 1000
 ORDER BY j.job_id;
 ```
 
-Ask the scheduler to start every job now by running this SQL against the fork. `run_job()` runs a job in your own session and leaves `job_stats` untouched, so it can't show that a job ran after the upgrade. Setting `next_start` makes the scheduler run the job within a few seconds and record the run.
+Ask the scheduler to start every job now by running this SQL against the fork.
 
 ```sql
 SELECT job_id, (alter_job(job_id, next_start => now())).next_start
 FROM timescaledb_information.jobs
 WHERE job_id >= 1000;
 ```
+
+Setting `next_start` makes the scheduler run each job within a few seconds and record the run in `job_stats`. `run_job()` runs a job in your own session and leaves `job_stats` untouched, so it can't show that a job ran after the upgrade.
 
 Wait a minute, then run the verification set with the time you recorded before the upgrade.
 
@@ -706,7 +720,7 @@ Verify every job shows `ok`. A job that still shows `NOT RUN since upgrade` has 
    1002 | Columnstore Policy [1002]                  | 2026-10-28 21:20:45.81671+00  | Success         | ok
 ```
 
-If a job shows `FAILED after upgrade`, run it on its own with `CALL run_job(<job_id>);` and read the error. A second failure is a signal to contact Support.
+If a job shows `FAILED after upgrade`, run it on its own with `CALL run_job(<job_id>);` and read the error. A second failure signals that you should contact Support.
 
 </NumberedItem>
 <NumberedItem title="Check the planner statistics">
@@ -764,16 +778,16 @@ Verify both plans read one chunk with the same scan type. A plan that reads more
 <NumberedList>
 <NumberedItem title="Set the maintenance window">
 
-Open the production service and click `Operations` > `Environment`. Under `Maintenance`, the page shows the current window. Choose a day, a two-hour time range in a low-traffic period, and a time zone, and click `Apply`. Tiger Cloud runs minor upgrades and TimescaleDB updates in this window, and lists them under `Upcoming maintenance`. When Tiger Data deprecates a PostgreSQL version, it emails a timeline, allows a period for a manual upgrade, and then upgrades the service in this window too, so a quiet window limits the downtime if you miss the deadline.
+Open the production service and click `Operations` > `Environment`. Under `Maintenance`, choose a day, a two-hour time range in a low-traffic period, and a time zone, and click `Apply`. Tiger Cloud uses this window for its own maintenance, including the automatic upgrade of a deprecated PostgreSQL version once the deadline in its deprecation email passes, and lists anything scheduled under `Upcoming maintenance`. A quiet window limits the downtime if you miss that deadline.
 
 ![The Maintenance section of the Environment page](maintenance-window.png)
 
-Plan your own upgrade from the fork's duration. If the service has a high availability (HA) replica or read replicas, add several hours for the rebuild. Record the window under `Maintenance window` in your runbook.
+Plan your own upgrade based on the fork's duration. If the service has a high availability (HA) replica or read replicas, add several hours for the rebuild. Record the window under `Maintenance window` in your runbook.
 
 </NumberedItem>
 <NumberedItem title="Run the pre-flight checks on production">
 
-Run the pre-flight script, the job export, and the running-job check against production by running these commands.
+Run the pre-flight script, job export, and running-job check against production with these commands.
 
 ```bash
 psql "$DATABASE_URL" -f preflight.sql -o preflight-production-before.txt
@@ -781,30 +795,30 @@ psql "$DATABASE_URL" -c "\copy (SELECT job_id, application_name, proc_name, sche
 psql "$DATABASE_URL" -c "SELECT job_id, job_status FROM timescaledb_information.job_stats WHERE job_status = 'Running';"
 ```
 
-Verify the running-job query returns no rows and the rollback fork shows as paused, then record the time with `date -u`.
+Verify the running-job query returns no rows, and the rollback fork shows as paused, then record the time with `date -u`.
 
 </NumberedItem>
 <NumberedItem title="Start the upgrade">
 
 Click `Operations` > `Service upgrades` > `Upgrade service` on the production service and confirm.
 
-Tiger Cloud removes HA and read replicas during the upgrade and rebuilds them from the upgraded primary afterward. The rebuild can take several hours, and the replica connection strings stay the same.
+Tiger Cloud removes HA and read replicas during the upgrade, then rebuilds them from the upgraded primary. The rebuild can take several hours, and the replica connection strings stay the same.
 
 </NumberedItem>
 <NumberedItem title="Update firewall allowlists">
 
-The service keeps its Domain Name System (DNS) name, and its Internet Protocol (IP) address often changes. Look up the address by running this command with the host from your connection string.
+Look up the service's address by running this command with the host from your connection string.
 
 ```bash
 nslookup <host>
 ```
 
-If a firewall rule allows the old address, update it. A rule that names the DNS name needs no change.
+The service keeps its DNS name, but its IP address often changes. If a firewall rule allows the old address, update it. A rule that names the DNS name needs no change.
 
 </NumberedItem>
 <NumberedItem title="Verify production">
 
-Run the pre-flight script against the upgraded service and compare it with its baseline, ask the scheduler to start every job, wait a minute, and run the verification set, by running these commands.
+Run the pre-flight script against the upgraded service and compare it with its baseline. Ask the scheduler to start every job, wait a minute, then run the verification set with these commands.
 
 ```bash
 psql "$DATABASE_URL" -f preflight.sql -o preflight-production-after.txt
@@ -832,7 +846,7 @@ Follow [Plan the version path](#plan-the-version-path) and [Run the pre-flight c
 <NumberedList>
 <NumberedItem title="Back up the database">
 
-Take a filesystem snapshot of the data directory while the server is stopped, or a logical backup with this command.
+Take a filesystem snapshot of the data directory while the server is stopped, or take a logical backup with this command.
 
 ```bash
 pg_dump -Fc -f before-upgrade.dump "$DATABASE_URL"
@@ -841,7 +855,7 @@ pg_dump -Fc -f before-upgrade.dump "$DATABASE_URL"
 </NumberedItem>
 <NumberedItem title="Install PostgreSQL 18 and the same TimescaleDB version">
 
-Show the TimescaleDB version and the data checksum setting on the old server by running this command. The new cluster has to match both.
+Run this command to show the TimescaleDB version and the data checksum setting on the old server.
 
 ```bash
 psql "$DATABASE_URL" -At -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';" -c "SHOW data_checksums;"
@@ -854,6 +868,8 @@ Verify the output shows the version and the checksum setting, which is `off` on 
 off
 ```
 
+The new cluster has to match both.
+
 Install PostgreSQL 18 and the TimescaleDB packages for it, pinned to that version, by running this command. Replace `2.31.0` with your version.
 
 ```bash
@@ -862,7 +878,7 @@ sudo apt install postgresql-18 \
     timescaledb-2-loader-postgresql-18='2.31.0*'
 ```
 
-List the clusters, and create an empty version 18 cluster if the packages didn't, by running these commands. PostgreSQL 18's `initdb` turns data checksums on by default, and `pg_upgrade` refuses to move a cluster between different checksum settings, so pass `--no-data-checksums` when the old cluster reported `off`.
+List the clusters, and create an empty version 18 cluster if the packages didn't, by running these commands. Pass `--no-data-checksums` when the old cluster reported `off`.
 
 ```bash
 pg_lsclusters
@@ -877,7 +893,7 @@ Ver Cluster Port Status Owner    Data directory              Log file
 18  main    5433 down   postgres /var/lib/postgresql/18/main /var/log/postgresql/postgresql-18-main.log
 ```
 
-If the packages created an `18 main` cluster already, stop it with `sudo systemctl stop postgresql@18-main`, and drop it with `sudo pg_dropcluster 18 main` before the `pg_createcluster` command if its checksum setting differs from the old cluster's. To gain checksums during the upgrade, stop the old cluster, run `pg_checksums --enable` on its data directory, which rewrites every data file, and create the new cluster with the default settings.
+PostgreSQL 18's `initdb` turns data checksums on by default, and `pg_upgrade` refuses to move a cluster between different checksum settings. If the packages created an `18 main` cluster already, stop it with `sudo systemctl stop postgresql@18-main`, and drop it with `sudo pg_dropcluster 18 main` before the `pg_createcluster` command if its checksum setting differs from the old cluster's. To gain checksums during the upgrade, stop the old cluster, run `pg_checksums --enable` on its data directory, which rewrites every data file, and create the new cluster with the default settings.
 
 Set `shared_preload_libraries` in the new cluster's configuration file by running this command.
 
@@ -889,7 +905,7 @@ sudo sed -i "s/^#*shared_preload_libraries.*/shared_preload_libraries = 'timesca
 </NumberedItem>
 <NumberedItem title="Check the upgrade while the old server runs">
 
-Run `pg_upgrade --check` by running this command. It runs while the old server is up and changes nothing. The `--old-options` and `--new-options` flags point at the configuration files, which the packages keep outside the data directories.
+Run `pg_upgrade --check` by running this command.
 
 ```bash
 cd /tmp && sudo -u postgres /usr/lib/postgresql/18/bin/pg_upgrade \
@@ -925,6 +941,8 @@ Checking for new cluster tablespace directories               ok
 *Clusters are compatible*
 ```
 
+The check runs while the old server is up and changes nothing. The `--old-options` and `--new-options` flags point to the configuration files, which the packages keep outside the data directories.
+
 If the TimescaleDB packages for version 18 are missing or a different version, the check stops with an error like this one.
 
 ```
@@ -938,7 +956,7 @@ problem libraries is in the file:
 Failure, exiting
 ```
 
-The file names the missing libraries, the loader and the versioned extension.
+The file names the missing libraries, the loader, and the versioned extension.
 
 ```
 could not load library "$libdir/timescaledb": ERROR:  could not access file "$libdir/timescaledb": No such file or directory
@@ -949,7 +967,7 @@ In database: tsdb
 
 Install the matching TimescaleDB version for PostgreSQL 18 and run the check again.
 
-If the two clusters differ in their checksum setting, the check stops earlier, with this message. Drop the new cluster and create it again to match the old one, as in the previous step.
+If the two clusters differ in their checksum setting, the check stops earlier with this message. Drop the new cluster and create it again to match the old one, as in the previous step.
 
 ```
 Performing Consistency Checks on Old Live Server
@@ -963,7 +981,7 @@ Failure, exiting
 </NumberedItem>
 <NumberedItem title="Stop the server and run the upgrade">
 
-Stop the old cluster and run `pg_upgrade` under `time` by running these commands. Link mode hard-links the old data files into the new cluster. Leave out `--link` for copy mode, which copies every file and leaves the old cluster startable as your rollback.
+Stop the old cluster and run `pg_upgrade` under `time` by running these commands. Leave out `--link` for copy mode, which copies every file and leaves the old cluster startable as your rollback.
 
 ```bash
 sudo systemctl stop postgresql@17-main
@@ -1015,12 +1033,12 @@ user    0m0.001s
 sys     0m0.008s
 ```
 
-On the test machine, the link-mode upgrade of a database with 1,415 relations took about four seconds. The data files were never copied, so the time went to the catalog rebuild.
+Link mode hard-links the old data files into the new cluster. On the test machine, the link-mode upgrade of a database with 1,415 relations took about four seconds. The data files were never copied, so the time was spent on the catalog rebuild.
 
 </NumberedItem>
 <NumberedItem title="Start the new server and verify it">
 
-Swap the ports so the new cluster takes over port 5432, then start it, by running these commands.
+Swap the ports so the new cluster takes over port 5432, then start it by running these commands.
 
 ```bash
 sudo sed -i "s/^port = 5432/port = 5433/" /etc/postgresql/17/main/postgresql.conf
@@ -1028,7 +1046,7 @@ sudo sed -i "s/^port = 5433/port = 5432/" /etc/postgresql/18/main/postgresql.con
 sudo systemctl start postgresql@18-main
 ```
 
-Run the pre-flight script against the new server, compare it with the baseline, ask the scheduler to start every job, wait a minute, and run the verification set, by running these commands.
+Run the pre-flight script against the new server, compare it with the baseline, ask the scheduler to start every job, wait a minute, then run the verification set with these commands.
 
 ```bash
 psql "$DATABASE_URL" -f preflight.sql -o preflight-after.txt
@@ -1039,7 +1057,7 @@ psql "$DATABASE_URL" -v upgrade_started="<time you recorded>" -f verify.sql -o v
 cat verify-after.txt
 ```
 
-Verify that the diff shows the server version, and at most a change in the statistics counts of the TimescaleDB internal schemas. The `public` count is unchanged, because PostgreSQL 18's `pg_upgrade` carries table statistics across.
+Verify that the diff shows the server version and, at most, changes to the statistics counts in the TimescaleDB internal schemas. The `public` count is unchanged because PostgreSQL 18's `pg_upgrade` carries table statistics across.
 
 ```
 2,4c2,4
@@ -1057,7 +1075,7 @@ Verify that the diff shows the server version, and at most a change in the stati
 >  _timescaledb_internal |                    262
 ```
 
-Fill in whatever statistics are missing by running the command `pg_upgrade` recommended. It analyzes only tables that have no statistics, in three passes of increasing detail.
+Fill in any missing statistics by running the command `pg_upgrade` recommended.
 
 ```bash
 vacuumdb --all --analyze-in-stages --missing-stats-only
@@ -1076,6 +1094,8 @@ vacuumdb: processing database "postgres": Generating default (full) optimizer st
 vacuumdb: processing database "template1": Generating default (full) optimizer statistics
 vacuumdb: processing database "tsdb": Generating default (full) optimizer statistics
 ```
+
+The command analyzes only tables that have no statistics, in three passes of increasing detail.
 
 Verify that `verify-after.txt` shows the same TimescaleDB version on PostgreSQL 18 and `ok` for every job.
 
@@ -1102,9 +1122,9 @@ Verify that `verify-after.txt` shows the same TimescaleDB version on PostgreSQL 
 
 ### Upgrade in Docker
 
-The `timescale/timescaledb` images carry one PostgreSQL version each, so dump the database from the old container and restore it into a new one between [`timescaledb_pre_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_pre_restore) and [`timescaledb_post_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_post_restore). Both images must carry the same TimescaleDB version. The commands use the `2.31.0-pg17` and `2.31.0-pg18` tags, an old container named `tsdb17`, and a database named `tsdb`.
+Both images must carry the same TimescaleDB version. The commands use the `2.31.0-pg17` and `2.31.0-pg18` tags, an old container named `tsdb17`, and a database named `tsdb`.
 
-Start the new container on a second port, create the database, install TimescaleDB in it, and prepare it for the restore by running these commands.
+Start the new container on a second port, create the database, install TimescaleDB, and prepare it for the restore by running these commands.
 
 ```bash
 docker run -d --name tsdb18 -p 5433:5432 \
@@ -1117,7 +1137,9 @@ docker exec tsdb18 psql -U postgres -d tsdb \
     -c "SELECT timescaledb_pre_restore();"
 ```
 
-Dump the database from the old container into the new one, under `time`, by running this command. Its time grows with the data size.
+The `timescale/timescaledb` images carry one PostgreSQL version each, so a container can't run `pg_upgrade`. A dump from the old container restored into the new one between [`timescaledb_pre_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_pre_restore) and [`timescaledb_post_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_post_restore) takes its place.
+
+Dump the database from the old container into the new one, under `time`, by running this command.
 
 ```bash
 time (docker exec tsdb17 pg_dump -U postgres -Fc tsdb \
@@ -1137,7 +1159,7 @@ user    0m0.075s
 sys     0m0.091s
 ```
 
-On the test machine, the dump and restore of the same database took about six seconds, close to the `pg_upgrade` time on this small dataset. The gap widens as the data grows.
+On the test machine, dumping and restoring the same database took about six seconds, close to the `pg_upgrade` time on this small dataset. A dump and restore copies every row, so its time grows with the data size and the gap widens on a large database.
 
 Finish the restore and rebuild the planner statistics by running these commands, then point `DATABASE_URL` at port 5433 and run the pre-flight script and the verification set.
 
@@ -1180,7 +1202,7 @@ Stop and open a Support ticket when any of these happens.
 - A job fails twice, once on its scheduled run and once when you run it with `run_job()`.
 - `ALTER EXTENSION timescaledb UPDATE` returns an error after the upgrade.
 - The replicas never start rebuilding after the primary returns.
-- The row counts or chunk counts in the pre-flight diff differ from the baseline.
+- The row counts, or chunk counts in the pre-flight diff, differ from the baseline.
 
 Attach the pre-flight baseline, the pre-flight diff, the verification output, and the time you started the upgrade.
 
@@ -1197,7 +1219,7 @@ On a self-hosted installation, after a copy-mode upgrade, start the old binaries
 These problems can come up while you follow the tutorial.
 
 - **The `Upgrade service` button is missing.** On a service that already runs the newest PostgreSQL version, the `Service upgrades` page shows the same number for `Current version` and `Latest version` and the line `Already using the latest version.` with no button. On a service that is forking, pausing, resizing, or rebuilding a replica, wait for its status to return to `Ready`.
-- **The upgrade runs much longer than the fork's.** Compare the relation count in `preflight-production-before.txt` with the fork's. If the counts are close and the upgrade passes twice the fork's duration, contact Support.
+- **The upgrade runs much longer than the fork's.** Compare the relation count in `preflight-production-before.txt` with the fork's. If the counts are close and the upgrade takes twice as long as the fork's duration, contact Support.
 - **A job fails after the upgrade.** Run it with `CALL run_job(<job_id>);` and read the error. A missing policy shows in the pre-flight diff under `Jobs and settings`, and `jobs-before.csv` holds the settings to recreate it. A second failure means contact Support.
 - **The application can't connect after the upgrade.** The IP address changed. Look up the new one with `nslookup`, update the firewall rule, and restart an application that caches DNS results.
 - **A continuous aggregate stops refreshing.** Check `verify.sql`'s output for the refresh job. `NOT RUN since upgrade` means the scheduler has not started it yet; set its `next_start` with `alter_job()` and check again. `FAILED after upgrade` means run it with `run_job()` and read the error.
@@ -1224,7 +1246,7 @@ The self-hosted measurements come from a desktop with an AMD Ryzen 9 5900HX and 
 
 > **PENDING CLIENT INPUT: PostgreSQL 17 test service.** The two Tiger Cloud rows and a sentence on what their durations show about the relation count come from upgrading forks of a PostgreSQL 17 service, which Tiger Data has to provide because the Console creates new services only on the newest major version.
 
-The two self-hosted routes took a few seconds each on this dataset. `pg_upgrade`'s time grows with the relation count and a dump and restore grows with the data size, so the gap between them widens on a large database.
+The two self-hosted routes took a few seconds each on this dataset. `pg_upgrade`'s time grows with relation count, and a dump and restore grows with data size, so the gap widens on a large database.
 
 For your next step, run `preflight.sql` against your own production service and write your version path into the runbook from the support matrix. The relation count tells you whether to expect a short upgrade or a long one, and the version path tells you whether a TimescaleDB update comes first.
 
