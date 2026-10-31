@@ -5,7 +5,7 @@ description: Inventory a self-hosted TimescaleDB database, move it into a Tiger 
 
 import { NumberedList, NumberedItem } from "@components/NumberedList";
 
-This tutorial shows you how to move a self-hosted TimescaleDB database into a Tiger Cloud service with `pg_dump` and `psql`, and verify its policies and continuous aggregates on the target before the application switches. Most of the work happens before the dump and after the restore, because extension versions, settings, roles, and background jobs move partially or stay behind. The source runs in a Docker container on your machine, loaded with a sample dataset, and a reader with a real instance points the inventory step at it. You keep an inventory script, a decision record, and a list of what Tiger Cloud now runs for you.
+This tutorial shows you how to move a self-hosted TimescaleDB database into a Tiger Cloud service with `pg_dump` and `psql`, and verify its policies and continuous aggregates on the target before the application switches. Most of the work happens before the dump and after the restore, because extension versions, settings, roles, and background jobs move partially or stay behind. The source runs in a Docker container on your machine, loaded with a sample dataset, and a reader with a real instance points the inventory step at it. By the end, you'll have an inventory script, a decision record, and a list of what Tiger Cloud now runs for you, all reusable for the next migration.
 
 If you want an overview of the migration methods first, see [Choose a migration approach](https://www.tigerdata.com/docs/migrate/choose-your-approach).
 
@@ -22,12 +22,14 @@ If you want an overview of the migration methods first, see [Choose a migration 
 <NumberedList>
 <NumberedItem title="Record the TimescaleDB version on your Tiger Cloud service">
 
-Save the service's connection string in `TARGET` and read its TimescaleDB version by running these commands. The dump path needs the same TimescaleDB version on both sides, so the source you set up next starts one minor version behind this one and catches up in a later step. The test for this tutorial used a service on TimescaleDB 2.31.0, which the outputs below show.
+Save the service's connection string in `TARGET` and read its TimescaleDB version by running these commands.
 
 ```bash
 export TARGET="postgres://tsdbadmin:<password>@<host>:<port>/tsdb?sslmode=require"
 psql "$TARGET" -Atc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';"
 ```
+
+The dump path needs the same TimescaleDB version on both sides, so the source you set up next starts one minor version behind this one and catches up in a later step. The test for this tutorial used a service on TimescaleDB 2.31.0, which the outputs below show.
 
 Verify the output is a TimescaleDB version.
 
@@ -40,7 +42,7 @@ Verify the output is a TimescaleDB version.
 </NumberedItem>
 <NumberedItem title="Start the source container">
 
-Start a `timescale/timescaledb-ha` container on PostgreSQL 17 with a named volume and port 5433 published, so it survives a restart and leaves port 5432 free, by running this command.
+Start a `timescale/timescaledb-ha` container on PostgreSQL 17 by running this command.
 
 ```bash
 docker run -d --name tsdb-source -p 5433:5432 \
@@ -49,7 +51,9 @@ docker run -d --name tsdb-source -p 5433:5432 \
     timescale/timescaledb-ha:pg17
 ```
 
-Save the source connection string in `SOURCE`, create the database from `template0`, and install the TimescaleDB version one minor behind your service, by running these commands. `template1` in this image already carries the newest TimescaleDB version, so a database cloned from it can't take an older one. Replace `2.30.2` with the version one minor behind the one you recorded. The image carries every release back to 2.16, so `SELECT version FROM pg_available_extension_versions WHERE name = 'timescaledb';` lists what you can pick.
+The named volume keeps the data across a container restart, and port 5433 leaves 5432 free for a PostgreSQL already on your machine.
+
+Save the source connection string in `SOURCE`, create the database, and install the TimescaleDB version one minor behind your service by running these commands. Replace `2.30.2` with the version one minor behind the one you recorded; `SELECT version FROM pg_available_extension_versions WHERE name = 'timescaledb';` lists what the image carries, every release back to 2.16.
 
 ```bash
 export SOURCE="postgres://postgres:<password>@localhost:5433/tsdb_source"
@@ -57,6 +61,8 @@ psql "postgres://postgres:<password>@localhost:5433/postgres" \
     -c "CREATE DATABASE tsdb_source TEMPLATE template0;"
 psql -X "$SOURCE" -c "CREATE EXTENSION timescaledb VERSION '2.30.2';"
 ```
+
+The database comes from `template0` because `template1` in this image already carries the newest TimescaleDB version, and a database cloned from it can't take an older one.
 
 Verify that `psql "$SOURCE" -c "\dx timescaledb"` shows the older version.
 
@@ -70,7 +76,7 @@ Verify that `psql "$SOURCE" -c "\dx timescaledb"` shows the older version.
 </NumberedItem>
 <NumberedItem title="Create the hypertable and load the dataset">
 
-Create the `sensor_data` hypertable with weekly chunks and the columnstore off, so no background job converts chunks while the loading script runs, by running this SQL in a `psql "$SOURCE"` session.
+Create the `sensor_data` hypertable by running this SQL in a `psql "$SOURCE"` session.
 
 ```sql
 CREATE TABLE sensor_data (
@@ -92,14 +98,18 @@ CREATE INDEX sensor_data_device_tag_time_idx
     ON sensor_data (device_id, tag, time DESC);
 ```
 
-Type `\q` to quit `psql`. Download `manufacturing.zip`, a sample dataset with hourly readings from ten sensors on each of five factory machines, over ten years, about 4.4 million records in total. Unzip it and install `psycopg`, the PostgreSQL driver for Python, by running these commands.
+The chunks are weekly, and the columnstore stays off so that no background job converts chunks while the loading script runs.
+
+Type `\q` to quit `psql`. Download `manufacturing.zip`, unzip it, and install `psycopg`, the PostgreSQL driver for Python, by running these commands.
 
 ```bash
 unzip manufacturing.zip
 pip install "psycopg[binary]"
 ```
 
-Save this script as `load_data.py`. It reads the file once to find the newest reading and shifts every timestamp forward so the newest reading falls in the current hour, which gives the continuous aggregate recent data to refresh. It streams the rows in with the PostgreSQL `COPY` command.
+The dataset holds hourly readings from ten sensors on each of five factory machines, over ten years, about 4.4 million records in total.
+
+Save this script as `load_data.py`.
 
 ```python
 """
@@ -172,14 +182,14 @@ if __name__ == "__main__":
     main()
 ```
 
-The script reads `DATABASE_URL`, so point that at the source and run it in the directory that holds `manufacturing.csv`. It takes a minute or two.
+Point `DATABASE_URL` at the source and run the script in the directory that holds `manufacturing.csv` by running these commands. It takes a minute or two.
 
 ```bash
 export DATABASE_URL="$SOURCE"
 python load_data.py
 ```
 
-Verify the script loaded about 4.4 million rows. On the test machine it took under a minute.
+Verify the script loaded about 4.4 million rows. On the test machine, it took under a minute.
 
 ```
 Finding the newest reading in the file...
@@ -198,7 +208,7 @@ Loaded 4,380,050 rows into sensor_data.
 </NumberedItem>
 <NumberedItem title="Add the policy layer">
 
-Reconnect with `psql "$SOURCE"`. Create a daily continuous aggregate with a refresh policy, a retention policy, and a columnstore policy, by running this SQL. These are the objects that move only partially, so the lab needs each kind. Each policy gets an `initial_start` an hour away, because the scheduler otherwise starts a new policy within seconds and would race the job runs you make yourself below.
+Reconnect with `psql "$SOURCE"`. Create a daily continuous aggregate with a refresh policy, a retention policy, and a columnstore policy by running this SQL.
 
 ```sql
 ANALYZE sensor_data;
@@ -236,7 +246,9 @@ CALL add_columnstore_policy('sensor_data',
     initial_start => now() + INTERVAL '1 hour');
 ```
 
-Create a `telemetry_app` role that owns a user-defined action, by running this SQL. A job keeps its owner through the restore and runs as that role on the target, which the verification step has to handle, so the lab plants one.
+Each policy gets an `initial_start` an hour away, because the scheduler otherwise starts a new policy within seconds and would race the job runs you make yourself below.
+
+Create a `telemetry_app` role that owns a user-defined action by running this SQL.
 
 ```sql
 CREATE ROLE telemetry_app LOGIN PASSWORD 'telemetry';
@@ -263,14 +275,18 @@ SELECT add_job('record_row_count', INTERVAL '1 day',
 RESET ROLE;
 ```
 
-Set one server parameter with `ALTER SYSTEM`, which writes it to `postgresql.auto.conf` where a dump never looks, by running this SQL.
+A job keeps its owner through the restore and runs as that role on the target, which the verification step has to handle, so the lab plants one.
+
+Set one server parameter with `ALTER SYSTEM` by running this SQL.
 
 ```sql
 ALTER SYSTEM SET work_mem = '32MB';
 SELECT pg_reload_conf();
 ```
 
-Run every job once with [`run_job()`](https://www.tigerdata.com/docs/reference/timescaledb/jobs-automation/run_job) by running this SQL. The retention job runs before the columnstore job, so the chunks it drops never get compressed. The columnstore job takes a minute or two.
+`ALTER SYSTEM` writes the setting to `postgresql.auto.conf`, where a dump never looks, so it is one the inventory has to catch.
+
+Run every job once with [`run_job()`](https://www.tigerdata.com/docs/reference/timescaledb/jobs-automation/run_job) by running this SQL. The columnstore job takes a minute or two.
 
 ```sql
 DO $$
@@ -289,7 +305,9 @@ END
 $$;
 ```
 
-List the jobs with their owners and the chunks by compression state with this SQL.
+The jobs run in id order, so the retention job runs before the columnstore job, and the chunks it drops never get compressed.
+
+List the jobs, their owners, and the chunks by compression state with this SQL.
 
 ```sql
 SELECT job_id, application_name, owner
@@ -328,7 +346,7 @@ Verify that the jobs list shows four jobs with two owners, and that all but the 
 <NumberedList>
 <NumberedItem title="Save the inventory script">
 
-Save this script as `inventory.sql`. It lists everything the migration can lose or change, and runs unchanged against the source and the target, so a `diff` of its two outputs is the final check. The sections that must match come first, and the sections that differ by design, the server version, roles, and settings, come last.
+Save this script as `inventory.sql`.
 
 ```sql
 -- inventory.sql: list what a TimescaleDB database holds, before and
@@ -410,10 +428,12 @@ WHERE source NOT IN ('default', 'override', 'client', 'session')
 ORDER BY name;
 ```
 
+The script runs unchanged against the source and the target, so a `diff` of its two outputs is the final check.
+
 </NumberedItem>
 <NumberedItem title="Run it against the source and export the job settings">
 
-Run the script and save its output, the migration's bill of materials and the baseline for the final diff, by running this command.
+Run the script against the source and save its output by running this command.
 
 ```bash
 psql "$SOURCE" -f inventory.sql -o source-inventory.txt
@@ -443,11 +463,13 @@ Compare `source-inventory.txt` with this example, which is trimmed to the sectio
  telemetry_app | f        | f             | f           | f              | t
 ```
 
-Export every job's settings to a comma-separated values (CSV) file by running this command, on one line, so you can recreate a policy by hand if the restore drops one.
+Export every job's settings to a comma-separated values (CSV) file by running this command on one line.
 
 ```bash
 psql "$SOURCE" -c "\copy (SELECT job_id, application_name, proc_schema, proc_name, owner, schedule_interval, max_runtime, max_retries, retry_period, scheduled, fixed_schedule, config FROM timescaledb_information.jobs WHERE job_id >= 1000 ORDER BY job_id) TO 'jobs-source.csv' WITH (FORMAT csv, HEADER)"
 ```
+
+The file lets you recreate a policy by hand if the restore drops one.
 
 Verify the command prints `COPY` followed by the number of jobs.
 
@@ -475,11 +497,13 @@ Verify that your inventory lists one hypertable, one continuous aggregate, four 
 
 ### Update the source's TimescaleDB to the target's version
 
-The dump carries TimescaleDB's internal catalog, which only the same version can read, so update the source to the version you recorded in [Set up the source](#set-up-the-source) by running this command. Use `psql -X` so a `.psqlrc` file can't run a query that loads the old version first. Replace `2.31.0` with your target's version.
+Update the source to the version you recorded in [Set up the source](#set-up-the-source) by running this command with `psql -X`. Replace `2.31.0` with your target's version.
 
 ```bash
 psql -X "$SOURCE" -c "ALTER EXTENSION timescaledb UPDATE TO '2.31.0';"
 ```
+
+The dump carries TimescaleDB's internal catalog, which only the same version can read. `-X` skips your `.psqlrc` file, so nothing in it can run a query that loads the old version before the update.
 
 Verify that `psql "$SOURCE" -c "\dx timescaledb"` shows the target's version.
 
@@ -492,13 +516,11 @@ Verify that `psql "$SOURCE" -c "\dx timescaledb"` shows the target's version.
 
 If the source already runs a newer TimescaleDB version than the target, the update has nothing to do and the dump can't load. For the lab, create the target first and read its version before you set the source's. For a real source that is ahead, wait for the Tiger Cloud release that carries its version, or open a Support request.
 
-If the source holds a continuous aggregate in the format from before TimescaleDB 2.7, the update to 2.25 or later stops with `continuous aggregates with old format found, update blocked` and names the aggregates. Migrate each one with the [`cagg_migrate`](https://www.tigerdata.com/docs/reference/timescaledb/continuous-aggregates/cagg_migrate) procedure and run the update again.
-
 PostgreSQL major versions can differ between the two sides, because the dump is plain SQL. The `pg_dump` client has to be at least as new as the source server.
 
 ### Check every extension against the Tiger Cloud list
 
-Compare the `Extensions` section of your inventory with [Tiger Cloud extensions](https://www.tigerdata.com/docs/deploy/tiger-cloud/tiger-cloud-aws/tiger-cloud-extensions). Save this file as `migration-decision.md` and record a decision for each extension that is missing from the list: replace it, drop it, or ask Support. A database that needs an extension Tiger Cloud lacks stays self-hosted until that decision is made.
+Compare the `Extensions` section of your inventory with [Tiger Cloud extensions](https://www.tigerdata.com/docs/deploy/tiger-cloud/tiger-cloud-aws/tiger-cloud-extensions). Save this file as `migration-decision.md` and record a decision for each extension that is missing from the list: replace it, drop it, or ask Support.
 
 ```markdown
 # Migration decision record
@@ -528,13 +550,15 @@ Method:
 Expected duration:
 ```
 
+A database that needs an extension Tiger Cloud lacks stays self-hosted until that decision is made.
+
 Verify that every extension in your inventory has a row in the record, and that `\dx` on the source shows the target's TimescaleDB version.
 
 ## Reconcile configuration and roles
 
 ### Sort the settings into three columns
 
-Copy each line of the `Non-default settings` section into the `Settings` table of your decision record with one of three dispositions. Settings that size the server to its hardware, such as `shared_buffers`, `effective_cache_size`, `max_connections`, and `max_worker_processes`, are managed by Tiger Cloud, which sets them for the compute you choose. Settings a database owner can set, such as `work_mem`, `statement_timeout`, and `log_min_duration_statement`, you apply after the restore in Tiger Console under `Operations` > `Database parameters`, or with `ALTER DATABASE`. Settings that describe the machine, such as `listen_addresses`, `port`, `data_directory`, `shared_preload_libraries`, and the `ssl_*` file paths, are gone.
+Copy each line of the `Non-default settings` section into the `Settings` table of your decision record with one of three dispositions, as in this example.
 
 ```markdown
 | Setting | Source value | Disposition |
@@ -544,11 +568,17 @@ Copy each line of the `Non-default settings` section into the `Settings` table o
 | listen_addresses | * | gone |
 ```
 
+| Disposition | Settings | What happens on Tiger Cloud |
+|---|---|---|
+| Managed by Tiger Cloud | Ones that size the server to its hardware: `shared_buffers`, `effective_cache_size`, `max_connections`, `max_worker_processes` | Set for the compute you choose |
+| Set with `ALTER DATABASE` | Ones a database owner can set: `work_mem`, `statement_timeout`, `log_min_duration_statement` | You apply them after the restore, in Tiger Console under `Operations` > `Database parameters` or with `ALTER DATABASE` |
+| Gone | Ones that describe the machine: `listen_addresses`, `port`, `data_directory`, `shared_preload_libraries`, the `ssl_*` file paths | Nothing to apply |
+
 Verify that every line of the section has a disposition.
 
 ### Dump the roles and strip the superuser clauses
 
-Tiger Cloud has no superuser. Its most powerful role is `tsdbadmin`, so everything that depended on `SUPERUSER` on the source maps to `tsdbadmin` on the target, and a role dump has to lose those clauses before it loads. Dump the roles with `pg_dumpall` and strip them with the `sed` script from the docs, by running these commands. The script also drops the `postgres` and `tsdbadmin` roles, which the target already has.
+Dump the roles with `pg_dumpall` and strip the superuser clauses with the `sed` script from the docs by running these commands.
 
 ```bash
 pg_dumpall -d "$SOURCE" -l tsdb_source \
@@ -568,6 +598,8 @@ sed -i -E \
     roles.sql
 ```
 
+Tiger Cloud has no superuser, so a role dump must remove those clauses before it loads. The script also drops the `postgres` and `tsdbadmin` roles, which the target already has.
+
 Verify that `roles.sql` creates `telemetry_app` with its password and no `SUPERUSER` or `REPLICATION` clause, by running `grep -A1 telemetry_app roles.sql`.
 
 ```
@@ -577,7 +609,7 @@ ALTER ROLE "telemetry_app" WITH  INHERIT NOCREATEROLE NOCREATEDB LOGIN   PASSWOR
 
 ### Check the three things Tiger Cloud rules out
 
-A Tiger Cloud service holds one database, keeps the `timescaledb` extension in the `public` schema, and has no custom tablespaces. Check the source for each by running this SQL in a `psql "$SOURCE"` session.
+Check the source for the three things a Tiger Cloud service rules out by running this SQL in a `psql "$SOURCE"` session.
 
 ```sql
 SELECT datname
@@ -593,7 +625,9 @@ FROM pg_tablespace
 WHERE spcname NOT LIKE 'pg\_%';
 ```
 
-Verify that the first query lists `postgres` and `tsdb_source`, the second returns `public`, and the third returns no rows. A source with a second database that the application uses needs a service of its own, or a schema in this one. A `timescaledb` extension outside `public` has to be recreated there before the dump, and the dump already drops tablespaces with `--no-tablespaces`.
+A Tiger Cloud service holds one database, keeps the `timescaledb` extension in the `public` schema, and has no custom tablespaces.
+
+Verify that the first query lists `postgres` and `tsdb_source`, the second returns `public`, and the third returns no rows.
 
 ```
   datname
@@ -610,9 +644,11 @@ Verify that the first query lists `postgres` and `tsdb_source`, the second retur
 (0 rows)
 ```
 
+A source with a second database that the application uses needs a service of its own, or a schema in this one. A `timescaledb` extension outside `public` has to be recreated there before the dump, and the dump already drops tablespaces with `--no-tablespaces`.
+
 ## Choose the method
 
-Fill in the `Method` section of your decision record from four inputs: the data size, the longest write pause the application accepts, whether chunks are compressed, and whether continuous aggregates exist. Read the size and the compression state by running this SQL in a `psql "$SOURCE"` session.
+Read the data size and the compression state by running this SQL in a `psql "$SOURCE"` session.
 
 ```sql
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
@@ -623,7 +659,14 @@ GROUP BY hypertable_name, is_compressed
 ORDER BY hypertable_name, is_compressed;
 ```
 
-Under 100 GB with a write pause the application accepts, use dump and restore. It moves compressed chunks as they are, with the same TimescaleDB version on both sides, and the docs estimate up to twelve hours of downtime near 100 GB. Over 100 GB, or when writes can't stop, use [Livesync replication](https://www.tigerdata.com/docs/migrate/livesync-replication), which copies compressed chunks in row form and so accepts a different TimescaleDB version on the target. Over 400 GB on either path, open a Support request first, so the service's disk is provisioned before the data arrives. Over 1 TB in one table, use Livesync replication with a backfill tool.
+Fill in the `Method` section of your decision record from four inputs: the data size, the longest write pause the application accepts, whether chunks are compressed, and whether continuous aggregates exist.
+
+| Data size and write pause | Method | What it means for the data |
+|---|---|---|
+| Under 100 GB, and the application can pause writes | Dump and restore | Compressed chunks move as they are; the TimescaleDB version has to match on both sides; the docs estimate up to twelve hours of downtime near 100 GB |
+| Over 100 GB, or writes can't stop | [Livesync replication](https://www.tigerdata.com/docs/migrate/livesync-replication) | Compressed chunks arrive in row form so that the target can run a newer TimescaleDB version |
+| Over 400 GB, either method | The same, after a Support request | Support provisions the service's disk before the data arrives |
+| Over 1 TB in one table | Livesync replication with a backfill tool | The backfill tool carries the history |
 
 The lab database is 77 MB after compression, far under the line, so the record picks dump and restore.
 
@@ -648,7 +691,7 @@ Verify that the record names the method, the four inputs, and the expected durat
 <NumberedList>
 <NumberedItem title="Stop the application">
 
-Stop the application, then check that nothing else is connected to the source by running this SQL in a `psql "$SOURCE"` session. A write that lands after the dump starts stays behind on the source.
+Stop the application, then check that nothing else is connected to the source by running this SQL in a `psql "$SOURCE"` session.
 
 ```sql
 SELECT pid, usename, application_name, state
@@ -657,6 +700,8 @@ WHERE datname = current_database()
   AND backend_type = 'client backend'
   AND pid <> pg_backend_pid();
 ```
+
+A write that lands after the dump starts stays behind on the source.
 
 Verify the query returns no rows.
 
@@ -669,7 +714,7 @@ Verify the query returns no rows.
 </NumberedItem>
 <NumberedItem title="Run the columnstore job once more and pause every job">
 
-Run the columnstore job so the dump carries as many compressed chunks as possible, then pause every job, by running this SQL. `pg_dump` holds a lock on every table it reads, and a retention or columnstore job that needs a stronger lock stalls behind it until the dump ends.
+Run the columnstore job again, then pause all jobs with this SQL.
 
 ```sql
 SELECT format('CALL run_job(%s);', job_id)
@@ -683,7 +728,9 @@ WHERE job_id >= 1000
 ORDER BY job_id;
 ```
 
-Verify that every job shows `scheduled` as `f`. The jobs arrive on the target paused for the same reason, and you turn them back on after the restore.
+`pg_dump` holds a lock on every table it reads, and a retention or columnstore job that needs a stronger lock stalls behind it until the dump ends. The jobs arrive on the target paused, and you turn them back on after the restore.
+
+Verify that every job shows `scheduled` as `f`.
 
 ```
  job_id | scheduled
@@ -697,7 +744,7 @@ Verify that every job shows `scheduled` as `f`. The jobs arrive on the target pa
 </NumberedItem>
 <NumberedItem title="Run the dump">
 
-Dump the database in plain format under `time` by running this command. `--no-owner` and `--no-privileges` leave out the `postgres` ownership and the grants, which the target can't replay. The dump carries TimescaleDB's job table with the rest of the catalog, with each job's owner as it is on the source.
+Dump the database in plain format under `time` by running this command.
 
 ```bash
 time pg_dump -d "$SOURCE" \
@@ -709,9 +756,9 @@ time pg_dump -d "$SOURCE" \
     --file=dump.sql
 ```
 
-`pg_dump` prints a warning about a circular foreign key on TimescaleDB's internal `continuous_agg` table, which is expected with this procedure and needs no action. Record the `real` time and the size of `dump.sql` under `Expected duration` in your decision record. On the test machine, the dump of about 2.2 million rows in 262 chunks took under a second and produced a 29 MB file, a fraction of the 77 MB database, because the compressed chunks dump as they are stored.
+`--no-owner` and `--no-privileges` leave out the `postgres` ownership and the grants, which the target can't replay. `pg_dump` prints a warning about a circular foreign key on TimescaleDB's internal `continuous_agg` table, which needs no action. Record the `real` time and the size of `dump.sql` under `Expected duration` in your decision record. On the test machine, the dump took under a second and produced a 29 MB file from the 77 MB database, because the compressed chunks dump as they are stored.
 
-Verify that `dump.sql` is a fraction of the database's size and contains the hypertable, by running these commands.
+Verify that `dump.sql` is a fraction of the database's size and contains the hypertable by running these commands.
 
 ```bash
 ls -lh dump.sql
@@ -731,18 +778,20 @@ grep -c 'CREATE TABLE "public"."sensor_data"' dump.sql
 <NumberedList>
 <NumberedItem title="Prepare the target">
 
-Open the service in Tiger Console and click `Operations` > `Environment`. Under `Maintenance`, choose a day and time range away from the migration, and click `Apply`. Tiger Cloud applies minor upgrades in this window and restarts the service when one needs it, which would stop the load partway.
+Open the service in Tiger Console and click `Operations` > `Environment`. Under `Maintenance`, choose a day and time range away from the migration, and click `Apply`. Tiger Cloud applies minor upgrades in this window and restarts the service when needed, which would stop the load partway.
 
-Create every extension from your inventory on the target by running this command, once per extension. The dump's `CREATE EXTENSION` statements come after objects that need the extension, so an extension missing at that point stops the load. `plpgsql` and `timescaledb` are already installed on every service.
+Create every extension from your inventory on the target by running this command, once per extension. `plpgsql` and `timescaledb` are already installed on every service.
 
 ```bash
 psql "$TARGET" -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;"
 ```
 
+The dump's `CREATE EXTENSION` statements come after objects that need the extension, so an extension missing at that point stops the load.
+
 </NumberedItem>
 <NumberedItem title="Load the roles and the dump">
 
-Load the two files in one `psql` run under `time`, by running this command. [`timescaledb_pre_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_pre_restore) stops the background workers and lets the dump write TimescaleDB's internal catalog, and [`timescaledb_post_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_post_restore) starts them again. Both calls name the `public` schema because the dump clears `search_path` for the session it loads in, and an unqualified call after it fails with `function timescaledb_post_restore() does not exist`. `ON_ERROR_STOP` halts on the first error, so a problem appears at the end of the output.
+Load the two files in one `psql` run under `time` by running this command.
 
 ```bash
 time psql "$TARGET" -v ON_ERROR_STOP=1 --echo-errors \
@@ -751,6 +800,8 @@ time psql "$TARGET" -v ON_ERROR_STOP=1 --echo-errors \
     -f dump.sql \
     -c "SELECT public.timescaledb_post_restore();"
 ```
+
+[`timescaledb_pre_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_pre_restore) stops the background workers and lets the dump write TimescaleDB's internal catalog, and [`timescaledb_post_restore()`](https://www.tigerdata.com/docs/reference/timescaledb/administration/timescaledb_post_restore) starts them again. Both calls name the `public` schema because the dump clears `search_path` for the session it loads in, and an unqualified call after it fails with `function timescaledb_post_restore() does not exist`.
 
 Record the `real` time under `Expected duration`. On the test service, the load took about 40 seconds and printed no notices.
 
@@ -770,7 +821,7 @@ real    0m41.779s
 </NumberedItem>
 <NumberedItem title="Update the planner statistics and check the size">
 
-The dump carries no planner statistics, so every query plans badly until they exist. A bare `ANALYZE` also visits the system catalogs, which `tsdbadmin` can't analyze, and prints a warning for each, so the first query builds one `ANALYZE` per table of yours and per materialized aggregate. Run it, then compare the row count and the database size with the source, by running this SQL in a `psql "$TARGET"` session.
+Update the planner statistics, then compare the row count and the database size with the source by running this SQL in a `psql "$TARGET"` session.
 
 ```sql
 SELECT format('ANALYZE %I.%I;', schemaname, tablename)
@@ -790,6 +841,8 @@ SELECT count(*) FROM sensor_data;
 
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 ```
+
+A bare `ANALYZE` prints a warning for every system catalog `tsdbadmin` can't analyze, so the first query builds one `ANALYZE` per table of yours and per materialized aggregate.
 
 Verify that the extension version matches the source, the row count matches the `Rows in each hypertable` section of `source-inventory.txt`, and the size is of the same order as the source's.
 
@@ -819,7 +872,7 @@ ANALYZE
 <NumberedList>
 <NumberedItem title="Give the application role its privileges back">
 
-Read the job owners on the target by running this SQL in a `psql "$TARGET"` session. A job that `postgres` owned on the source arrives owned by `tsdbadmin`, and a job owned by any other role keeps that owner and runs as it.
+Read the job owners on the target by running this SQL in a `psql "$TARGET"` session.
 
 ```sql
 SELECT job_id, application_name, owner
@@ -837,17 +890,21 @@ ORDER BY job_id;
    1003 | User-Defined Action [1003]                 | telemetry_app
 ```
 
-`--no-owner` made `tsdbadmin` the owner of every restored table and `--no-privileges` left every grant behind, so the job `telemetry_app` owns fails with `permission denied` until the role can read and write its tables again. Grant them back by running this SQL.
+A job that `postgres` owned on the source arrives owned by `tsdbadmin`, and a job owned by any other role keeps that owner and runs as it.
+
+Grant the application role its privileges back by running this SQL.
 
 ```sql
 GRANT SELECT ON sensor_data TO telemetry_app;
 GRANT SELECT, INSERT ON sensor_data_counts TO telemetry_app;
 ```
 
+`--no-owner` made `tsdbadmin` the owner of every restored table, and `--no-privileges` left every grant behind, so the job `telemetry_app` owns fails with `permission denied` until the role can read and write its tables again.
+
 </NumberedItem>
 <NumberedItem title="Turn the jobs on and ask the scheduler to run them">
 
-Turn every job back on and set its next start to now, by running this SQL in a `psql "$TARGET"` session. The scheduler then runs each job within a few seconds and records the run in `job_stats`. `run_job()` runs a job in your own session and leaves `job_stats` untouched, so it can't show that a job works under the scheduler.
+Turn every job back on and set its next start to now by running this SQL in a `psql "$TARGET"` session.
 
 ```sql
 SELECT job_id, application_name,
@@ -856,6 +913,8 @@ FROM timescaledb_information.jobs
 WHERE job_id >= 1000
 ORDER BY job_id;
 ```
+
+The scheduler then runs each job within a few seconds and records the run in `job_stats`. `run_job()` runs a job in your own session and leaves `job_stats` untouched, so it can't show that a job works under the scheduler.
 
 Verify that the four jobs show `scheduled` as `t`.
 
@@ -878,7 +937,7 @@ psql "$TARGET" -f inventory.sql -o target-inventory.txt
 diff source-inventory.txt target-inventory.txt
 ```
 
-Verify that the diff starts at the `Jobs` section with the three jobs whose owner changed, and that everything after it is a difference you expect: the extensions Tiger Cloud preinstalls, the server version, the roles Tiger Cloud adds, and the settings. A difference in the hypertable, row, chunk, columnstore, or continuous aggregate sections means the restore lost something, and `jobs-source.csv` and `dump.sql` hold what you need to put it back.
+Verify that the diff starts at the `Jobs` section with the three jobs whose owner changed, and that everything after it is a difference you expect: the extensions Tiger Cloud preinstalls, the server version, the roles Tiger Cloud adds, and the settings.
 
 ```
 37,39c37,39
@@ -894,6 +953,8 @@ Verify that the diff starts at the `Jobs` section with the three jobs whose owne
 ...
 ```
 
+A difference in the hypertable, row, chunk, columnstore, or continuous aggregate sections means the restore lost something, and `jobs-source.csv` and `dump.sql` hold what you need to put it back.
+
 </NumberedItem>
 <NumberedItem title="Check that every job ran">
 
@@ -906,7 +967,7 @@ WHERE job_id >= 1000
 ORDER BY job_id;
 ```
 
-Verify that every job shows `Success` with a start time after the restore. A job with no run yet has not started, so wait and run the query again. A job that shows `Failed` is one to run with `CALL run_job(<job_id>);` to read its error.
+Verify that every job shows `Success` with a start time after the restore.
 
 ```
  job_id | last_run_status |      last_run_started_at
@@ -916,6 +977,8 @@ Verify that every job shows `Success` with a start time after the restore. A job
    1002 | Success         | 2026-10-30 02:32:12.173056+00
    1003 | Success         | 2026-10-30 02:32:12.173814+00
 ```
+
+A job with no run yet has not started, so wait and run the query again. A job that shows `Failed` is one to run with `CALL run_job(<job_id>);` to read its error.
 
 </NumberedItem>
 </NumberedList>
@@ -939,7 +1002,7 @@ WHERE tag = 'temperature'
 GROUP BY device_id;
 ```
 
-Verify that both plans read one chunk, the one that holds yesterday. The scan type can differ on a chunk this small, where a sequential scan and an index scan cost about the same, and the two servers run different PostgreSQL major versions, so the surrounding lines differ too. A plan that reads more chunks on the target than on the source is the regression to fix before cutover.
+Verify that both plans read one chunk, the one that holds yesterday.
 
 ```
  HashAggregate  (cost=32.34..32.40 rows=5 width=17) (actual time=0.339..0.341 rows=5.00 loops=1)
@@ -962,17 +1025,19 @@ Verify that both plans read one chunk, the one that holds yesterday. The scan ty
  Execution Time: 0.188 ms
 ```
 
-Both plans are trimmed to the lines that name the chunk and the scan.
+The scan type can differ on a chunk this small. A plan that reads more chunks on the target than on the source is the regression to fix before cutover.
 
 ### Apply the settings
 
-Apply each setting in the `set with ALTER DATABASE` column of your decision record, by running this SQL in a `psql "$TARGET"` session. Settings listed under `Operations` > `Database parameters` in Tiger Console you can set there instead.
+Apply each setting in the `set with ALTER DATABASE` column of your decision record by running this SQL in a `psql "$TARGET"` session.
 
 ```sql
 ALTER DATABASE tsdb SET work_mem = '32MB';
 ```
 
-Verify that a new session shows the setting, by running `psql "$TARGET" -c "SHOW work_mem;"`.
+Settings listed under `Operations` > `Database parameters` in Tiger Console can be set there as well.
+
+Verify that a new session shows the setting by running `psql "$TARGET" -c "SHOW work_mem;"`.
 
 ```
  work_mem
@@ -987,7 +1052,7 @@ Verify that a new session shows the setting, by running `psql "$TARGET" -c "SHOW
 - **Version floors.** The source needs TimescaleDB 2.16.0 or later if any chunk is compressed or decompressed during the sync, because earlier versions replicate those rows twice. It needs 2.18.0 or later for Livesync to export the columnstore settings from `timescaledb_information.hypertable_columnstore_settings`.
 - **The publication.** Name each table. `FOR ALL TABLES` includes the `_timescaledb_catalog` tables, and replicating them corrupts the target's catalog. Add a hypertable with tiered chunks with `ONLY`, since tiered chunks are foreign tables. Leave chunks unmerged and unsplit while the sync runs, and on a Tiger Cloud source pause the tiering jobs with `alter_job()` first.
 - **Columnstore settings.** Set `segmentby` and `orderby` on the source before you start, so the export carries them. Compressed chunks arrive in row form, which is what frees the target from the same-version rule, and the columnstore policy is applied on the target after the sync.
-- **Continuous aggregates.** Livesync replicates the materialization hypertable, `_timescaledb_internal._materialized_hypertable_<N>`. Set `REPLICA IDENTITY FULL` on it on the source, because a refresh issues deletes, add it to the publication, and map it to the target's own `_materialized_hypertable_<M>`, whose number can differ. Leave the refresh policy off the target until cutover.
+- **Continuous aggregates.** Livesync replicates the materialization hypertable, `_timescaledb_internal._materialized_hypertable_<N>`. Set `REPLICA IDENTITY FULL` on it on the source, because a refresh issues deletes; add it to the publication, and map it to the target's own `_materialized_hypertable_<M>`, whose number can differ. Leave the refresh policy off the target until cutover.
 - **At cutover.** Reset every sequence with the `copy-sequences` command or `setval()`, because Livesync leaves sequence values behind and the first insert after cutover would reuse a key, then apply the refresh, retention, and columnstore policies from the exported settings. A retention policy that dropped chunks on the source during the sync did not drop them on the target, so run it there once.
 
 ## Retire what Tiger Cloud now owns
@@ -1005,16 +1070,16 @@ Go through your self-hosted runbook and give each item a disposition. Record the
 
 Keep what Tiger Cloud does not do: application monitoring, alerting on `job_stats` for a failed job, and the inventory script, which is the baseline for the next migration or upgrade.
 
-Verify that no runbook item is without a disposition.
+Verify that every runbook item has a disposition.
 
 ## Cut over and clean up
 
 <NumberedList>
 <NumberedItem title="Repoint the application">
 
-Set the maintenance window for the long term, in a low-traffic period, by the same path as before. The first window can apply a minor upgrade you did not schedule, and a window you chose for the migration is unlikely to suit production.
+Set the maintenance window for the long term during a low-traffic period, using the same path as before, because the first window may apply a minor upgrade you did not schedule.
 
-Point the application at the target's connection string and start it, then watch both sides by running this SQL in a session on each. The source should show no application connections, and the target should show them alongside Tiger Cloud's own `postgres_exporter` and `ForgeExplorer` sessions, which are always there.
+Point the application at the target's connection string and start it, then watch both sides by running this SQL in a session on each.
 
 ```sql
 SELECT usename, application_name, count(*)
@@ -1025,18 +1090,22 @@ WHERE datname = current_database()
 GROUP BY usename, application_name;
 ```
 
-Leave the container running with the application stopped against it. It holds the data as of the dump and is the rollback point, so a rollback loses every write made on Tiger Cloud since cutover, and the rollback gets more expensive with every hour the service runs.
+The source should show no application connections, and the target should show them alongside Tiger Cloud's own `postgres_exporter` and `ForgeExplorer` sessions, which are always there.
+
+Leave the container running as the rollback point, knowing that a rollback loses every write made on Tiger Cloud since cutover.
 
 </NumberedItem>
 <NumberedItem title="Remove the source and the dump files">
 
-Once the application has run a full cycle on Tiger Cloud, remove the container, its volume, and the files that hold a copy of the data, by running these commands. `roles.sql` holds password hashes and `dump.sql` holds every row.
+After the application has run a full cycle on Tiger Cloud, remove the container, its volume, and the dump files with these commands.
 
 ```bash
 docker rm -f tsdb-source
 docker volume rm tsdb-source-data
 rm dump.sql roles.sql
 ```
+
+`roles.sql` holds password hashes and `dump.sql` holds every row, so neither belongs on disk longer than the migration.
 
 Verify that the service serves the application, `job_stats` keeps showing `Success`, and `docker ps -a` no longer lists the container.
 
@@ -1045,7 +1114,7 @@ Verify that the service serves the application, `job_stats` keeps showing `Succe
 
 ### Revisit the chunk interval and the columnstore settings
 
-Tiger Cloud adds tiered storage, which moves old chunks to object storage. With it in place, a shorter chunk interval or an earlier columnstore policy can suit the service better than the settings you carried over. Record what you change in the decision record.
+Tiger Cloud adds tiered storage, which moves old chunks to object storage. With that in mind, a shorter chunk interval or an earlier columnstore policy may suit the service better than the settings you carried over. Record what you change in the decision record.
 
 ## Troubleshooting
 
@@ -1056,7 +1125,7 @@ These problems can come up while you follow the tutorial. A load that stops leav
 - **The load stops on a tablespace or a `SUPERUSER` clause.** The dump was made without `--no-tablespaces`, or `roles.sql` was not run through the `sed` script. Dump again with the flags shown.
 - **`ALTER EXTENSION timescaledb UPDATE` is blocked.** The source holds a continuous aggregate in the old format. Migrate it with `cagg_migrate` and update again.
 - **The chunk count differs between the inventories.** A retention job ran on one side after the inventory. Compare the `Rows in each hypertable` section. If it matches, run the inventory again on both sides. If the rows differ too, a write landed on the source after the dump started, and the rows since then are on the source only.
-- **A job fails on the target with `permission denied`.** The job kept an owner other than `tsdbadmin`, and that role lost its grants in the restore. Grant the role what it needs, as in [Verify the policy layer](#verify-the-policy-layer), and set the job's `next_start` again. A user-defined action that needs a privilege `tsdbadmin` lacks needs a rewrite before it runs on Tiger Cloud.
+- **A job fails on the target with `permission denied`.** The job kept an owner other than `tsdbadmin`, and that role lost its grants in the restore. Grant the role what it needs, as in [Verify the policy layer](#verify-the-policy-layer), and set the job's `next_start` again. A user-defined action that needs the `tsdbadmin` lacks needs a rewrite before it runs on Tiger Cloud.
 
 ## Recap
 
@@ -1068,14 +1137,14 @@ You moved a self-hosted TimescaleDB database into a Tiger Cloud service by inven
 | `jobs-source.csv` | Every job's settings | When a policy goes missing and has to be recreated |
 | `migration-decision.md` | Extension decisions, setting dispositions, the method and its inputs, the runbook table | At the next migration, as the starting point |
 
-These measurements were collected from a source container on PostgreSQL 17.11 with TimescaleDB 2.31.0, running under Docker Desktop on a desktop with an AMD Ryzen 9 5900HX, dumped with `pg_dump` 18.3, and loaded into a Tiger Cloud service with 8 CPUs and 32 GiB of memory on PostgreSQL 18.6 with TimescaleDB 2.31.0.
+These measurements were collected from a source container on PostgreSQL 17.11 with TimescaleDB 2.31.0, running under Docker Desktop on a laptop with an AMD Ryzen 9 5900HX, dumped with `pg_dump` 18.3, and loaded into a Tiger Cloud service with 8 CPUs and 32 GiB of memory on PostgreSQL 18.6 with TimescaleDB 2.31.0.
 
 | Step | Rows | Chunks | Compressed chunks | Size | Duration |
 |---|---|---|---|---|---|
 | `pg_dump` | 2,193,750 | 262 | 260 | `dump.sql` 29 MB | 0.6 seconds |
 | `psql` load | 2,193,750 | 262 | 260 | database 115 MB | 42 seconds |
 
-The load took about seventy times as long as the dump. The dump reads the compressed chunks as stored and writes them out once, while the load writes them back, rebuilds every index, and checks every constraint, so the load is the part of the window that grows with the data.
+The load took about seventy times as long as the dump, because it rebuilds every index and checks every constraint, so the load is the part of the window that grows with the data.
 
 For your next step, run `inventory.sql` against your own instance and sort its output into moves, moves with help, and stays behind. The second group is the work the migration takes, and the third tells you whether the database can move at all.
 
