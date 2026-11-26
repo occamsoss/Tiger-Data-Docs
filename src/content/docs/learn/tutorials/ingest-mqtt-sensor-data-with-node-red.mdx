@@ -1,0 +1,550 @@
+---
+title: Ingest MQTT sensor data into TimescaleDB in batches with Node-RED
+description: Write MQTT sensor messages to a hypertable in batches with a Node-RED flow, using simulated readings from five factory machines
+---
+
+import { NumberedList, NumberedItem } from "@components/NumberedList";
+
+This tutorial shows you how to create a Node-RED flow that reads sensor messages from an MQTT broker, batches them, and writes them to a hypertable. It uses simulated readings from four sensors on each of five factory machines, which a Python script publishes through a Mosquitto broker in Docker.
+
+If you want an overview of connecting Node-RED to your service first, see the guide [Integrate Node-RED with Tiger Cloud](https://www.tigerdata.com/docs/integrate/data-ingestion-streaming/node-red).
+
+## What you learn
+
+- How to write MQTT messages to a hypertable with the Node-RED PostgreSQL node.
+- How to batch messages by count or time window into one multi-row `INSERT`.
+- How to measure insert rate and publish-to-query lag against a target.
+- How to retry inserts that fail.
+- How to chart live readings from a continuous aggregate.
+
+## Set a target
+
+Choose two numbers before you create the flow. The message rate is the number of messages your sensors publish each second. The lag is the longest time you accept between a sensor publishing a reading and a query returning it. This tutorial uses a message rate of 2,000 messages per second and a lag of 5 seconds.
+
+## Set up the stack
+
+<NumberedList>
+<NumberedItem title="Create a Tiger Cloud service">
+
+Create a Tiger Cloud service by following [our previous guide](https://www.tigerdata.com/docs/get-started/quickstart/create-service). Download the configuration file when you create it, and keep it for the next steps. The file holds your connection details.
+
+> **Note:** You can also follow this tutorial with a self-hosted TimescaleDB database instead.
+
+</NumberedItem>
+<NumberedItem title="Connect to your service">
+
+Save your connection string in the `DATABASE_URL` environment variable and connect to your database with these commands:
+
+```bash
+export DATABASE_URL="<connection string>"
+psql "$DATABASE_URL"
+```
+
+</NumberedItem>
+<NumberedItem title="Create the hypertable">
+
+Create the `sensor_data` hypertable by running this SQL in your `psql` session:
+
+```sql
+CREATE TABLE sensor_data (
+    time      timestamptz NOT NULL,
+    device_id text NOT NULL,
+    tag       text NOT NULL,
+    value     double precision
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.segmentby = 'device_id',
+    tsdb.orderby = 'time DESC'
+);
+```
+
+[`CREATE TABLE ... WITH`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/create_table) also adds a [columnstore policy](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/add_columnstore_policy), which converts each chunk to the columnstore after seven days, the default chunk interval, and groups the converted rows by machine.
+
+</NumberedItem>
+<NumberedItem title="Save the connection details and the message rate">
+
+Create a directory for this tutorial's files. In it, save your service's connection details and the message rate in a file named `.env`, replacing `<host>`, `<port>`, and `<password>` with the values from your configuration file:
+
+```bash
+PGHOST=<host>
+PGPORT=<port>
+PGDATABASE=tsdb
+PGUSER=tsdbadmin
+PGPASSWORD=<password>
+MESSAGE_RATE=2000
+```
+
+</NumberedItem>
+<NumberedItem title="Create the sensor publisher">
+
+Save this script as `publisher.py` in the same directory. It publishes each reading as a JSON message to the topic `factory/<machine>/<sensor>`:
+
+```python
+"""
+Publish simulated sensor readings from five factory machines to MQTT.
+
+Each message holds one reading. The script spreads MESSAGE_RATE messages
+per second across every sensor on every machine and prints the rate it
+reached every ten seconds.
+"""
+import json
+import os
+import random
+import time
+from datetime import datetime, timezone
+
+import paho.mqtt.client as mqtt
+
+RATE = int(os.environ["MESSAGE_RATE"])
+MACHINES = [f"machine{n}" for n in range(1, 6)]
+SENSORS = {
+    "temperature": 70.0,
+    "vibration": 8.0,
+    "pressure": 5.0,
+    "power_consumption": 40.0,
+}
+
+
+def main():
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.connect("mosquitto", 1883)
+    client.loop_start()
+
+    interval = len(MACHINES) * len(SENSORS) / RATE
+    next_round = time.monotonic()
+    sent, since = 0, time.monotonic()
+
+    while True:
+        now = datetime.now(timezone.utc).isoformat()
+        for machine in MACHINES:
+            for tag, typical in SENSORS.items():
+                reading = {
+                    "time": now,
+                    "value": round(random.gauss(typical, typical * 0.05), 2),
+                }
+                client.publish(f"factory/{machine}/{tag}", json.dumps(reading))
+                sent += 1
+
+        elapsed = time.monotonic() - since
+        if elapsed >= 10:
+            print(f"Published {sent / elapsed:.0f} messages per second",
+                  flush=True)
+            sent, since = 0, time.monotonic()
+
+        next_round += interval
+        time.sleep(max(0.0, next_round - time.monotonic()))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+</NumberedItem>
+<NumberedItem title="Start Mosquitto, Node-RED, and the publisher (in a second terminal)">
+
+Save this file as `compose.yaml` in the same directory:
+
+```yaml
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    command: mosquitto -c /mosquitto-no-auth.conf
+
+  node-red:
+    image: nodered/node-red
+    env_file: .env
+    ports:
+      - "1880:1880"
+    volumes:
+      - node-red-data:/data
+    depends_on:
+      - mosquitto
+
+  publisher:
+    image: python:3.13-slim
+    environment:
+      MESSAGE_RATE: ${MESSAGE_RATE}
+    volumes:
+      - ./publisher.py:/publisher.py
+    command: sh -c "pip install --quiet paho-mqtt && python /publisher.py"
+    depends_on:
+      - mosquitto
+
+volumes:
+  node-red-data:
+```
+
+Open a second terminal in that directory and start the three containers by running this command:
+
+```bash
+docker compose up -d
+```
+
+Read 20 messages from the broker by running this command:
+
+```bash
+docker compose exec -T mosquitto mosquitto_sub -t "factory/#" -v -C 20
+```
+
+Verify the output shows a reading from each of the four sensors on all five machines. This example shows the first four of the 20 lines:
+
+```
+factory/machine1/temperature {"time": "2026-11-26T20:43:33.059981+00:00", "value": 70.3}
+factory/machine1/vibration {"time": "2026-11-26T20:43:33.059981+00:00", "value": 7.99}
+factory/machine1/pressure {"time": "2026-11-26T20:43:33.059981+00:00", "value": 5.15}
+factory/machine1/power_consumption {"time": "2026-11-26T20:43:33.059981+00:00", "value": 39.02}
+```
+
+</NumberedItem>
+</NumberedList>
+
+## Insert one row per message
+
+<NumberedList>
+<NumberedItem title="Install the PostgreSQL node">
+
+Open the Node-RED editor at `http://localhost:1880`. In the main menu, select `Manage palette`. On the `Install` tab, search for `node-red-contrib-postgresql` and install it.
+
+</NumberedItem>
+<NumberedItem title="Import the flow">
+
+In the main menu, select `Import`, paste this JSON, and click `Import`:
+
+```json
+[
+{"id":"sensor_ingest","type":"tab","label":"Sensor ingest","disabled":false,"info":""},
+{"id":"mosquitto_broker","type":"mqtt-broker","name":"Mosquitto","broker":"mosquitto","port":"1883","tls":"","clientid":"","autoConnect":true,"usetls":false,"verifyservercert":false,"compatmode":false,"protocolVersion":4,"keepalive":60,"cleansession":true,"autoUnsubscribe":true,"birthTopic":"","birthQos":"0","birthRetain":"false","birthPayload":"","birthMsg":{},"closeTopic":"","closeQos":"0","closeRetain":"false","closePayload":"","closeMsg":{},"willTopic":"","willQos":"0","willRetain":"false","willPayload":"","willMsg":{},"userProps":"","sessionExpiry":0},
+{"id":"tiger_cloud","type":"postgreSQLConfig","name":"Tiger Cloud","host":"127.0.0.1","hostFieldType":"str","port":5432,"portFieldType":"num","database":"postgres","databaseFieldType":"str","ssl":false,"sslFieldType":"bool","applicationName":"","applicationNameType":"str","max":10,"maxFieldType":"num","idle":1000,"idleFieldType":"num","connectionTimeout":10000,"connectionTimeoutFieldType":"num","userFieldType":"cred","userEnv":"","passwordFieldType":"cred","passwordEnv":""},
+{"id":"sensor_readings","type":"mqtt in","z":"sensor_ingest","name":"Sensor readings","topic":"factory/+/+","qos":"0","datatype":"json","broker":"mosquitto_broker","nl":false,"rap":true,"rh":0,"inputs":0,"x":140,"y":120,"wires":[["build_row"]]},
+{"id":"build_row","type":"function","z":"sensor_ingest","name":"Build row","func":"const [, device, tag] = msg.topic.split(\"/\");\nmsg.params = [msg.payload.time, device, tag, msg.payload.value];\nreturn msg;","outputs":1,"timeout":0,"noerr":0,"initialize":"","finalize":"","libs":[],"x":340,"y":120,"wires":[["insert"]]},
+{"id":"insert","type":"postgresql","z":"sensor_ingest","name":"Insert","query":"INSERT INTO sensor_data (time, device_id, tag, value)\nVALUES ($1, $2, $3, $4);","postgreSQLConfig":"tiger_cloud","split":false,"rowsPerMsg":1,"outputs":1,"x":520,"y":120,"wires":[[]]}
+]
+```
+
+`Sensor readings` subscribes to every topic under `factory` and parses each message as JSON. `Build row` takes the machine and the sensor from the topic and puts the four values of the row in `msg.params`. `Insert` runs its `INSERT` once for each message, with `msg.params` as the statement's parameters.
+
+</NumberedItem>
+<NumberedItem title="Set the PostgreSQL connection">
+
+Double-click the `Insert` node and click the pencil button next to `Server`. Set these fields so that the node reads the connection details from `.env`.
+
+| Tab | Field | Type | Value |
+|---|---|---|---|
+| `Connection` | `Host` | `env variable` | `PGHOST` |
+| `Connection` | `Port` | `env variable` | `PGPORT` |
+| `Connection` | `Database` | `env variable` | `PGDATABASE` |
+| `Connection` | `SSL` | `JSON` | `{"rejectUnauthorized": false}` |
+| `Security` | `User` | `env variable` | `PGUSER` |
+| `Security` | `Password` | `env variable` | `PGPASSWORD` |
+
+Click `Update`, `Done`, and then `Deploy`.
+
+This `SSL` value encrypts the connection without verifying the server's certificate, which matches the `sslmode=require` setting in your connection string.
+
+</NumberedItem>
+<NumberedItem title="Verify the rows">
+
+Show the newest readings by running this SQL in your `psql` session:
+
+```sql
+SELECT time, device_id, tag, value
+FROM sensor_data
+ORDER BY time DESC
+LIMIT 5;
+```
+
+Verify the output shows the machine and the sensor from each message's topic, and the time the publisher set.
+
+```
+             time             | device_id |     tag     | value
+------------------------------+-----------+-------------+-------
+ 2026-11-26 20:44:42.95007+00 | machine1  | temperature | 67.68
+ 2026-11-26 20:44:42.95007+00 | machine3  | pressure    |  4.96
+ 2026-11-26 20:44:42.95007+00 | machine2  | temperature | 64.55
+ 2026-11-26 20:44:42.95007+00 | machine1  | pressure    |  5.22
+ 2026-11-26 20:44:42.95007+00 | machine4  | temperature | 66.81
+(5 rows)
+```
+
+</NumberedItem>
+</NumberedList>
+
+## Measure the flow against the target
+
+<NumberedList>
+<NumberedItem title="Read the message rate">
+
+Show the publisher's latest log lines by running this command in the second terminal:
+
+```bash
+docker compose logs --tail 3 publisher
+```
+
+Verify the publisher reaches about 2,000 messages per second.
+
+```
+publisher-1  | Published 2000 messages per second
+publisher-1  | Published 2000 messages per second
+publisher-1  | Published 2000 messages per second
+```
+
+</NumberedItem>
+<NumberedItem title="Measure the insert rate and the lag">
+
+Count the rows that arrive in ten seconds and measure the age of the newest row by running this SQL in your `psql` session:
+
+```sql
+SELECT count(*) AS before FROM sensor_data \gset
+SELECT pg_sleep(10);
+SELECT (count(*) - :before) / 10 AS rows_per_second,
+       round(extract(epoch FROM now() - max(time)), 1) AS lag_seconds
+FROM sensor_data;
+```
+
+Verify that `rows_per_second` is below the message rate and `lag_seconds` is above the 5-second target.
+
+```
+ rows_per_second | lag_seconds
+-----------------+-------------
+            1621 |        10.2
+(1 row)
+```
+
+The flow sends one `INSERT` for each message and waits for the reply, on at most ten connections, so the round trip to your service limits its rate. A message that waits more than ten seconds for a connection fails with `timeout exceeded when trying to connect`. The lag stays near ten seconds, and the flow loses every reading that times out.
+
+> **Note:** If `rows_per_second` matches the message rate, the network path from your computer to your service is fast enough for single-row inserts at this rate. Raise `MESSAGE_RATE` in `.env`, run `docker compose up -d` again, and repeat this section.
+
+</NumberedItem>
+</NumberedList>
+
+## Batch the inserts
+
+<NumberedList>
+<NumberedItem title="Add the batching function">
+
+In the editor, delete the `Build row` node. Drag a `function` node from the palette onto the flow, name it `Batch rows`, and replace the code on its `On Message` tab with this code:
+
+```js
+const MAX_ROWS = 1000;  // Flush at this many rows,
+const MAX_WAIT = 1000;  // or this many milliseconds after the first row.
+
+const [, device, tag] = msg.topic.split("/");
+const rows = context.get("rows") || [];
+rows.push([msg.payload.time, device, tag, msg.payload.value]);
+context.set("rows", rows);
+
+if (rows.length >= MAX_ROWS) {
+    flush();
+} else if (rows.length === 1) {
+    context.set("timer", setTimeout(flush, MAX_WAIT));
+}
+
+function flush() {
+    clearTimeout(context.get("timer"));
+    const batch = context.get("rows") || [];
+    context.set("rows", []);
+    if (batch.length > 0) {
+        // One array per column, in the order of the INSERT's parameters.
+        const columns = [0, 1, 2, 3].map((c) => batch.map((row) => row[c]));
+        node.send({ params: columns });
+    }
+}
+```
+
+Click `Done`. Wire `Sensor readings` to `Batch rows`, and `Batch rows` to `Insert`.
+
+The time limit matters at a low message rate, where 1,000 rows would take longer than the target lag to arrive.
+
+</NumberedItem>
+<NumberedItem title="Insert each batch with one statement">
+
+Double-click the `Insert` node, replace its query with this SQL, and then click `Done` and `Deploy`:
+
+```sql
+INSERT INTO sensor_data (time, device_id, tag, value)
+SELECT * FROM unnest(
+    $1::timestamptz[], $2::text[], $3::text[], $4::float8[]
+);
+```
+
+Each parameter is an array that holds one column of the batch, and [`unnest()`](https://www.postgresql.org/docs/current/functions-array.html) turns the four arrays into rows. The statement and its four parameters stay the same for any batch size.
+
+</NumberedItem>
+<NumberedItem title="Measure the flow again">
+
+Wait 15 seconds, so the messages that the one-row flow left in its queue finish or time out. Then run the SQL from [Measure the flow against the target](#measure-the-flow-against-the-target) again.
+
+Verify that `rows_per_second` matches the message rate and `lag_seconds` is under the 5-second target.
+
+```
+ rows_per_second | lag_seconds
+-----------------+-------------
+            2000 |         0.5
+(1 row)
+```
+
+</NumberedItem>
+</NumberedList>
+
+## Retry failed inserts
+
+<NumberedList>
+<NumberedItem title="Add the catch and delay nodes">
+
+Drag a `catch` node and a `delay` node from the palette onto the flow. Double-click the `catch` node, set `Catch errors from` to `selected nodes`, select `Insert`, and click `Done`. Wire the `catch` node to the `delay` node, and the `delay` node to `Insert`. Then click `Deploy`.
+
+When an `INSERT` fails, the `catch` node receives the batch, and the `delay` node sends it back to `Insert` after 5 seconds, the node's default delay. Node-RED drops a batch when it fails for the tenth time, so the flow retries each batch for about 45 seconds. Raise the delay to cover a longer outage.
+
+</NumberedItem>
+<NumberedItem title="Rename the table for 30 seconds">
+
+Make every `INSERT` fail for 30 seconds by renaming `sensor_data` and renaming it back with this SQL in your `psql` session:
+
+```sql
+SELECT now() AS outage_start \gset
+ALTER TABLE sensor_data RENAME TO sensor_data_renamed;
+SELECT pg_sleep(30);
+ALTER TABLE sensor_data_renamed RENAME TO sensor_data;
+```
+
+Verify that the status under the `Insert` node in the editor shows `Error!` while the SQL runs.
+
+</NumberedItem>
+<NumberedItem title="Check for a gap">
+
+Wait ten seconds, so the flow inserts the batches it held. Then count the readings for each ten seconds of the outage by running this SQL:
+
+```sql
+SELECT floor(extract(epoch FROM time - :'outage_start'::timestamptz) / 10) * 10
+           AS seconds_after_rename,
+       count(*) AS readings
+FROM sensor_data
+WHERE time >= :'outage_start'
+  AND time < :'outage_start'::timestamptz + INTERVAL '30 seconds'
+GROUP BY 1
+ORDER BY 1;
+```
+
+Verify the output shows about 20,000 readings for each ten seconds, which is the message rate with no readings lost.
+
+```
+ seconds_after_rename | readings
+----------------------+----------
+                    0 |    20000
+                   10 |    20000
+                   20 |    20000
+(3 rows)
+```
+
+</NumberedItem>
+</NumberedList>
+
+## Add a continuous aggregate and a dashboard
+
+<NumberedList>
+<NumberedItem title="Create the continuous aggregate">
+
+Create a [continuous aggregate](https://www.tigerdata.com/docs/learn/continuous-aggregates) that averages each sensor's readings for every minute, and a policy that refreshes it every minute, by running this SQL:
+
+```sql
+CREATE MATERIALIZED VIEW sensor_data_minute
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT time_bucket('1 minute', time) AS bucket,
+       device_id,
+       tag,
+       avg(value) AS avg_value
+FROM sensor_data
+GROUP BY bucket, device_id, tag;
+
+SELECT add_continuous_aggregate_policy('sensor_data_minute',
+    start_offset => INTERVAL '1 hour',
+    end_offset => INTERVAL '1 minute',
+    schedule_interval => INTERVAL '1 minute');
+```
+
+`timescaledb.materialized_only = false` turns on [real-time aggregation](https://www.tigerdata.com/docs/learn/continuous-aggregates/real-time-aggregates), so a query on `sensor_data_minute` also returns the minutes that the policy has yet to refresh.
+
+</NumberedItem>
+<NumberedItem title="Install the dashboard nodes">
+
+In the editor's main menu, select `Manage palette`. On the `Install` tab, search for `@flowfuse/node-red-dashboard` and install it.
+
+</NumberedItem>
+<NumberedItem title="Import the dashboard flow">
+
+In the main menu, select `Import`, paste this JSON, click `Import`, and then click `Deploy`:
+
+```json
+[
+{"id":"dashboard_tab","type":"tab","label":"Dashboard","disabled":false,"info":""},
+{"id":"dashboard_base","type":"ui-base","name":"Dashboard","path":"/dashboard","appIcon":"","includeClientData":true,"acceptsClientConfig":["ui-notification","ui-control"],"showPathInSidebar":false,"headerContent":"page","navigationStyle":"default","titleBarStyle":"default","showReconnectNotification":true,"notificationDisplayTime":1,"showDisconnectNotification":true,"allowInstall":false},
+{"id":"dashboard_theme","type":"ui-theme","name":"Default theme","colors":{"surface":"#fcfcfd","primary":"#0d74ce","bgPage":"#f9f9fb","groupBg":"#ffffff","groupOutline":"#d9d9e0"},"sizes":{"density":"default","pagePadding":"12px","groupGap":"12px","groupBorderRadius":"4px","widgetGap":"12px"}},
+{"id":"factory_page","type":"ui-page","name":"Factory","ui":"dashboard_base","path":"/factory","icon":"home","layout":"grid","theme":"dashboard_theme","breakpoints":[{"name":"Default","px":0,"cols":3},{"name":"Tablet","px":576,"cols":6},{"name":"Small Desktop","px":768,"cols":9},{"name":"Desktop","px":1024,"cols":12}],"tabs":[],"order":1,"className":"","visible":"true","disabled":"false"},
+{"id":"machines_group","type":"ui-group","name":"Machines","page":"factory_page","width":"12","height":"1","order":1,"showTitle":true,"className":"","visible":true,"disabled":false,"groupType":"default","keepLoaded":false,"tab":""},
+{"id":"every_10_seconds","type":"inject","z":"dashboard_tab","name":"Every 10 seconds","props":[],"repeat":"10","crontab":"","once":true,"onceDelay":"1","topic":"","payload":"","payloadType":"date","x":160,"y":120,"wires":[["query_aggregate"]]},
+{"id":"query_aggregate","type":"postgresql","z":"dashboard_tab","name":"Query aggregate","query":"SELECT bucket, device_id, avg_value\nFROM sensor_data_minute\nWHERE tag = 'temperature'\n  AND bucket > now() - INTERVAL '30 minutes'\nORDER BY bucket, device_id;","postgreSQLConfig":"tiger_cloud","split":false,"rowsPerMsg":1,"outputs":1,"x":380,"y":120,"wires":[["temperature_chart"]]},
+{"id":"temperature_chart","type":"ui-chart","z":"dashboard_tab","group":"machines_group","name":"Temperature chart","label":"Average temperature by machine","order":1,"chartType":"line","category":"device_id","categoryType":"property","xAxisLabel":"","xAxisProperty":"bucket","xAxisPropertyType":"property","xAxisType":"time","xAxisFormat":"","xAxisFormatType":"auto","xmin":"","xmax":"","yAxisLabel":"","yAxisProperty":"avg_value","yAxisPropertyType":"property","ymin":"","ymax":"","bins":10,"action":"replace","stackSeries":false,"pointShape":"circle","pointRadius":4,"showLegend":true,"removeOlder":1,"removeOlderUnit":"3600","removeOlderPoints":"","colors":["#0095FF","#FF0000","#FF7F0E","#2CA02C","#A347E1","#D62728","#FF9896","#9467BD","#C5B0D5"],"textColor":["#666666"],"textColorDefault":true,"gridColor":["#e5e5e5"],"gridColorDefault":true,"width":"12","height":"8","className":"","interpolation":"linear","x":610,"y":120,"wires":[[]]}
+]
+```
+
+Every ten seconds, the flow queries `sensor_data_minute` for the last 30 minutes of average temperature and replaces the chart's data with the result.
+
+</NumberedItem>
+<NumberedItem title="Open the dashboard">
+
+Open `http://localhost:1880/dashboard`. Verify the chart shows one line for each machine and adds a point to each line every minute.
+
+</NumberedItem>
+</NumberedList>
+
+When you finish, stop the containers, so the publisher stops writing to your service, by running this command in the second terminal:
+
+```bash
+docker compose down
+```
+
+## Troubleshooting
+
+These problems can come up while you follow the tutorial.
+
+- **The `Sensor readings` node never shows `connected`.** Node-RED reaches Mosquitto through its Compose service name. Double-click the node, click the pencil button next to `Server`, and check that the server is `mosquitto` and the port is `1883`. Then run `docker compose ps` and check that the `mosquitto` container is running.
+- **The chart misses the newest readings.** The continuous aggregate returns only the minutes that its policy has refreshed, and the policy leaves out the most recent minute. Turn on real-time aggregation with `ALTER MATERIALIZED VIEW sensor_data_minute SET (timescaledb.materialized_only = false);`.
+- **The flows are gone after the Node-RED container restarts.** Node-RED stores its flows and installed nodes in `/data`. Check that `compose.yaml` maps the `node-red-data` volume to `/data`, and stop the containers with `docker compose down`. Adding `-v` to that command deletes the volume. Install the nodes and import the flows again.
+
+## Recap
+
+In this tutorial, you wrote MQTT sensor messages to a hypertable with a Node-RED flow, measured the flow against a target, and changed it to insert in batches. Use this table as a reference for each part of the flow.
+
+| Section | Technique | Why it matters |
+|---|---|---|
+| Insert one row per message | A parameterized `INSERT` that takes its values from `msg.params` | Each MQTT message becomes a row with the time the sensor published it |
+| Measure the flow against the target | Rows inserted per second and the age of the newest row | Shows whether the flow inserts rows as fast as the sensors publish them |
+| Batch the inserts | A buffer that flushes at a row count or a time window, and one `INSERT` that uses `unnest()` | One round trip to the database carries up to 1,000 rows |
+| Retry failed inserts | `catch` and `delay` nodes that send a failed batch back to the PostgreSQL node | The flow keeps every batch through a database outage of up to 45 seconds |
+| Add a continuous aggregate and a dashboard | A continuous aggregate with real-time aggregation | The chart reads one row for each machine and minute, including the current minute |
+
+These measurements were collected with Node-RED 5.0.10 and `node-red-contrib-postgresql` 0.16.2 running in Docker on a desktop with an AMD Ryzen 9 5900HX and 15 GiB of memory for Docker, and a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. A round trip from the computer to the service took about 5 ms, and the computer's clock was within 0.2 seconds of the service's clock.
+
+| Flow | Messages published per second | Rows inserted per second | Lag in seconds | Meets the target |
+|---|---|---|---|---|
+| One row per message | 2,000 | 1,621 | 10.2 | No |
+| Batched | 2,000 | 2,000 | 0.5 | Yes |
+
+On the test setup, the one-row flow inserted 1,621 of the 2,000 readings published each second, and it lost the others when they timed out after ten seconds in the queue. The batched flow sent the same readings in two statements per second, and every reading reached the hypertable within one second. The round trip to the database sets the rate of a one-row flow. With the test setup's round trip of 5 ms, that rate stayed near 1,600 rows per second, and a longer round trip lowers it. In a separate run on the same setup, the batched flow also inserted every reading at 4,000 and 8,000 messages per second.
+
+The batching function works with any Node-RED input that sends one message for each reading, such as the `http in` or `websocket in` node, once you change the lines that take the row from the message.
+
+For your next step, connect the flow to your own broker and topics, set a message rate and a lag for your data, and run the measurement again. The batch size and the time window that meet a target depend on the message rate and on the round trip between Node-RED and your service, so measure them where the flow will run.
+
+### Learn more
+
+- [Integrate Node-RED with Tiger Cloud](https://www.tigerdata.com/docs/integrate/data-ingestion-streaming/node-red)
+- [`CREATE TABLE ... WITH`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/create_table)
+- [Understand hypercore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore), the columnstore in TimescaleDB
+- [Understand continuous aggregates](https://www.tigerdata.com/docs/learn/continuous-aggregates)
+- [Real-time aggregates](https://www.tigerdata.com/docs/learn/continuous-aggregates/real-time-aggregates)
+- [`add_continuous_aggregate_policy()`](https://www.tigerdata.com/docs/reference/timescaledb/continuous-aggregates/add_continuous_aggregate_policy)
+- [`node-red-contrib-postgresql`](https://flows.nodered.org/node/node-red-contrib-postgresql), the PostgreSQL node for Node-RED
+- [Handling errors](https://nodered.org/docs/user-guide/handling-errors) in the Node-RED documentation
+- [The chart node](https://dashboard.flowfuse.com/nodes/widgets/ui-chart.html) in the Node-RED Dashboard 2.0 documentation
