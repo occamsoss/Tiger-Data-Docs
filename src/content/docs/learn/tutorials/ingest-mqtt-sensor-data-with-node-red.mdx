@@ -17,10 +17,6 @@ If you want an overview of connecting Node-RED to your service first, see the gu
 - How to retry inserts that fail.
 - How to chart live readings from a continuous aggregate.
 
-## Set a target
-
-Choose two numbers before you create the flow. The message rate is the number of messages your sensors publish each second. The lag is the longest time you accept between a sensor publishing a reading and a query returning it. This tutorial uses a message rate of 2,000 messages per second and a lag of 5 seconds.
-
 ## Set up the stack
 
 <NumberedList>
@@ -74,6 +70,8 @@ PGUSER=tsdbadmin
 PGPASSWORD=<password>
 MESSAGE_RATE=2000
 ```
+
+`MESSAGE_RATE` is the number of messages the sensors publish each second, and this tutorial uses 2,000.
 
 </NumberedItem>
 <NumberedItem title="Create the sensor publisher">
@@ -271,6 +269,8 @@ Verify the output shows the machine and the sensor from each message's topic, an
 </NumberedList>
 
 ## Measure the flow against the target
+
+This tutorial's target has two parts. The flow inserts rows at the message rate of 2,000 per second, and the lag stays under 5 seconds. The lag is the time between a sensor publishing a reading and a query returning it.
 
 <NumberedList>
 <NumberedItem title="Read the message rate">
