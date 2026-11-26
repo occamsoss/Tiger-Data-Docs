@@ -21,7 +21,7 @@ If you want an overview of Tiger CLI and Tiger MCP first, see [Tiger CLI and Tig
 <NumberedList>
 <NumberedItem title="Create a Tiger Cloud service">
 
-Create a Tiger Cloud service by following [our previous guide](https://www.tigerdata.com/docs/get-started/quickstart/create-service). Download the configuration file when you create it, and keep it for the next step. The file holds your connection string.
+Create a Tiger Cloud service by following [our previous guide](https://www.tigerdata.com/docs/get-started/quickstart/create-service). This service plays the role of your production service in this tutorial. Download the configuration file when you create it, and keep it for the next step. The file holds your connection string.
 
 </NumberedItem>
 <NumberedItem title="Connect to your service">
@@ -57,7 +57,7 @@ CREATE TABLE sensor_data (
 );
 ```
 
-This statement turns the [columnstore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore) on by default. The empty `tsdb.segmentby` leaves the columnstore with no `segmentby` column, which is the problem you will fix later in this tutorial.
+The empty `tsdb.segmentby` leaves the [columnstore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore) with no `segmentby` column, which is the problem you fix later in this tutorial.
 
 </NumberedItem>
 <NumberedItem title="Load the manufacturing dataset">
@@ -230,6 +230,36 @@ DO
 ```
 
 </NumberedItem>
+<NumberedItem title="Start a dashboard query (in a second terminal)">
+
+Open a second terminal and start a new `psql` session. Turn on timing and repeat a dashboard query, the ten-year average and highest temperature of `machine1`, every second with this SQL:
+
+```sql
+\timing on
+SELECT avg(value) AS avg_temperature,
+       max(value) AS max_temperature
+FROM sensor_data
+WHERE device_id = 'machine1'
+  AND tag = 'temperature'
+\watch 1
+```
+
+The query plays the role of a dashboard panel that refreshes every second. Leave it running for the rest of the tutorial.
+
+Verify each run prints its time.
+
+```
+    11/26/2026 1:13:26 PM (every 1s)
+
+  avg_temperature   |  max_temperature
+--------------------+-------------------
+ 38.247549846810344 | 71.29281018685788
+(1 row)
+
+Time: 208.801 ms
+```
+
+</NumberedItem>
 </NumberedList>
 
 ## Set up the agent
@@ -237,12 +267,14 @@ DO
 <NumberedList>
 <NumberedItem title="Install Tiger CLI and log in">
 
-Quit `psql` and install Tiger CLI by following [Get started with Tiger CLI](https://www.tigerdata.com/docs/get-started/quickstart/tiger-cli). If you already have Tiger CLI, update it to the latest version first, because older versions lack read-only mode. Then log in and list your services with these commands:
+In the first terminal, quit `psql` and install Tiger CLI by following [Get started with Tiger CLI](https://www.tigerdata.com/docs/get-started/quickstart/tiger-cli). If you already have Tiger CLI, update it to the latest version first, because older versions lack read-only mode. Then log in and list your services with these commands:
 
 ```bash
 tiger auth login
 tiger service list
 ```
+
+If Tiger CLI asks which services should be protected from writes, press `q` to decide later. You set this option in a later step.
 
 Verify the output lists your service, and note its service ID for the steps that follow.
 
@@ -274,19 +306,7 @@ In [Tiger Console](https://console.cloud.tigerdata.com/dashboard/services), sele
 tiger service get <service-id>
 ```
 
-Verify the `Environment` row shows `PROD` in the output, which this example trims to its first rows:
-
-```
-┌───────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│     PROPERTY      │                                              VALUE                                               │
-├───────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ Service ID        │ vqrg57rgbf                                                                                       │
-│ Name              │ tutorial-db                                                                                      │
-│ Status            │ READY                                                                                            │
-│ Type              │ TIMESCALEDB                                                                                      │
-│ Region            │ us-east-2                                                                                        │
-│ Environment       │ PROD                                                                                             │
-```
+Verify the `Environment` row shows `PROD`.
 
 </NumberedItem>
 <NumberedItem title="Turn on read-only mode for production">
@@ -302,16 +322,16 @@ With this setting, Tiger CLI and Tiger MCP open read-only database sessions on s
 </NumberedItem>
 <NumberedItem title="Install Tiger MCP for Claude Code">
 
-Add Tiger MCP to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with this command:
+Install [Claude Code](https://code.claude.com/docs/en/setup) if you don't have it. It requires a paid Claude plan or a Claude Console account. Then add Tiger MCP to Claude Code with this command:
 
 ```bash
 tiger mcp install claude-code
 ```
 
 </NumberedItem>
-<NumberedItem title="Start Claude Code (in a second terminal)">
+<NumberedItem title="Start Claude Code (in a third terminal)">
 
-Open a second terminal in the same directory as the first and start Claude Code with the `claude` command. The agent writes a file to this directory later, and you run that file from the first terminal.
+Open a third terminal in the same directory as the first and start Claude Code with the `claude` command. The agent writes a file to this directory later, and you run that file from the first terminal. Approve the Tiger MCP tool calls when Claude Code asks for permission.
 
 </NumberedItem>
 <NumberedItem title="Confirm the agent can read and can't write">
@@ -342,68 +362,18 @@ ERROR: cannot execute CREATE TABLE in a read-only transaction (SQLSTATE 25006)
 ## Find the slow query
 
 <NumberedList>
-<NumberedItem title="Repeat a dashboard query (in a third terminal)">
-
-Open a third terminal and start a new `psql` session. Turn on timing and repeat a dashboard query, the ten-year average and highest temperature of `machine1`, every second with this SQL:
-
-```sql
-\timing on
-SELECT avg(value) AS avg_temperature,
-       max(value) AS max_temperature
-FROM sensor_data
-WHERE device_id = 'machine1'
-  AND tag = 'temperature'
-\watch 1
-```
-
-Leave the query running for the rest of the tutorial.
-
-Verify each run prints its time.
-
-```
-    11/26/2026 1:13:26 PM (every 1s)
-
-  avg_temperature   |  max_temperature
---------------------+-------------------
- 38.247549846810344 | 71.29281018685788
-(1 row)
-
-Time: 208.801 ms
-    11/26/2026 1:13:27 PM (every 1s)
-
-  avg_temperature   |  max_temperature
---------------------+-------------------
- 38.247549846810344 | 71.29281018685788
-(1 row)
-
-Time: 206.582 ms
-    11/26/2026 1:13:29 PM (every 1s)
-
-  avg_temperature   |  max_temperature
---------------------+-------------------
- 38.247549846810344 | 71.29281018685788
-(1 row)
-
-Time: 218.490 ms
-```
-
-Wait about five minutes before the next step, so the service metrics include the query.
-
-</NumberedItem>
 <NumberedItem title="Check the CPU usage and the logs">
 
-Ask the agent for the service's CPU usage and logs with this prompt:
+If you started the dashboard query less than five minutes ago, wait until five minutes have passed, so the service metrics include it. Then ask the agent for the service's CPU usage and logs with this prompt:
 
 ```text
 For service <service-id>, show the CPU usage for the past hour against the service's total CPU, and tell me the average for the past three minutes. Then summarize the service logs for the same hour.
 ```
 
-Verify the agent reports the CPU usage and summarizes the logs. Note the three-minute average, which you compare with the value after the fix. Example reply, trimmed to the CPU average and the agent's conclusion:
+Verify the agent reports the CPU usage and summarizes the logs. Example reply, trimmed to the CPU average:
 
 ```
 CPU on tutorial-db jumped about 50-fold at 18:07 UTC and has stayed there. Even so, the service is using under 6% of its 8 cores. Average over the last three minutes: 468 millicores, 5.9% of total CPU.
-
-The columnstore job's log lines stop at 18:08:15, but CPU has stayed around 465 millicores for 30 minutes since. I checked pg_stat_activity just now: there are no active queries, and every background process is idle. Neither the logs nor the database sessions explain the sustained load.
 ```
 
 </NumberedItem>
@@ -421,9 +391,9 @@ Verify the agent names the dashboard query and reports that the query reads ever
 The top statement is a monitoring query that runs about every 1.2 seconds. Each run reads all 523 chunks of sensor_data, decompresses about 4.4 million rows and throws away 98% of them. It's also the most likely cause of the sustained CPU from the last question.
 ```
 
-The plan has one branch for each chunk, which is more than the 100 rows the agent's query tool returns, so the agent summarizes the plan.
+Claude Code may show some of the agent's tool calls as failed, because the agent can return its plan summary through a raised error.
 
-The columnstore sorts each chunk by time alone, so every compressed batch holds rows from all machines and sensors. The query reads every batch and discards the rows from the other machines and sensors. A [`segmentby`](https://www.tigerdata.com/docs/build/columnar-storage/setup-hypercore) setting groups compressed rows by the columns it names, so a query for one machine and sensor reads only that group.
+A [`segmentby`](https://www.tigerdata.com/docs/build/columnar-storage/setup-hypercore) setting groups compressed rows by the columns it names, so a query for one machine and sensor reads only that group.
 
 </NumberedItem>
 </NumberedList>
@@ -433,15 +403,15 @@ The columnstore sorts each chunk by time alone, so every compressed batch holds 
 <NumberedList>
 <NumberedItem title="Fork the service">
 
-Ask the agent to fork the production service with this prompt:
+The fork is a second billable service, which you delete at the end of this tutorial. Ask the agent to fork the production service with this prompt:
 
 ```text
 Fork service <service-id> at its current state, wait until the fork is ready, and tell me the fork's service ID.
 ```
 
-Verify the agent reports a new service ID, and note it. On the test service, the fork took about two minutes.
+Verify the agent reports a new service ID, and note it. The fork can take several minutes.
 
-Read-only mode allows the fork because Tiger MCP tags a fork `DEV` by default. The agent can write to the fork and still can't write to the production service.
+Tiger MCP tags the fork `DEV`, so the agent can write to it and still can't write to the production service.
 
 </NumberedItem>
 <NumberedItem title="Write the change to a file">
@@ -459,9 +429,8 @@ TimescaleDB applies a new `segmentby` setting only to chunks it converts after t
 
 Open `segmentby.sql` and check it against this list.
 
-- It sets `segmentby` on `sensor_data` to `device_id, tag`, the two columns the dashboard query filters on.
+- It sets `segmentby` on `sensor_data` to `device_id, tag`, the two columns the dashboard query filters on. An `orderby` of `time DESC`, as in the example, is the order the chunks already use.
 - It converts every chunk to the rowstore and back to the columnstore.
-- Each call to [`convert_to_rowstore()`](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/convert_to_rowstore) and [`convert_to_columnstore()`](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/convert_to_columnstore) uses only parameters that the reference lists.
 - It has no `BEGIN` or `COMMIT`. Tiger CLI and Tiger MCP run a file as one transaction, and a `COMMIT` inside a `DO` block fails there.
 - It changes nothing else.
 
@@ -469,22 +438,23 @@ Compare the file with this example:
 
 ```sql
 ALTER TABLE sensor_data SET (
-    tsdb.segmentby = 'device_id, tag'
+    timescaledb.segmentby = 'device_id, tag',
+    timescaledb.orderby   = 'time DESC'
 );
 
 DO $$
 DECLARE
     chunk regclass;
 BEGIN
-    FOR chunk IN SELECT c FROM show_chunks('sensor_data') AS c LOOP
-        CALL convert_to_rowstore(chunk);
-        CALL convert_to_columnstore(chunk);
+    FOR chunk IN SELECT c FROM show_chunks('sensor_data') AS c ORDER BY 1 LOOP
+        CALL convert_to_rowstore(chunk, if_columnstore => true);
+        CALL convert_to_columnstore(chunk, if_not_columnstore => true);
     END LOOP;
 END
 $$;
 ```
 
-If the file does something else, edit it or ask the agent to correct it. On the test run, the agent's file also set `orderby` to `time DESC`, which the chunks already used.
+If the file does something else, edit it or ask the agent to correct it.
 
 </NumberedItem>
 <NumberedItem title="Run the file on the fork">
@@ -499,7 +469,7 @@ The agent's query tool stops a statement after 30 seconds unless the prompt sets
 
 Verify the agent reports that both statements completed.
 
-If the run fails, the agent may correct the file and run it again. Review the file again before you continue. On the test run, the first attempt failed on a wrong parameter name, the agent corrected the file, and the second attempt took 14 seconds.
+If the run fails, nothing changes on the fork, and the agent may correct the file and run it again. Review the file again before you continue.
 
 </NumberedItem>
 <NumberedItem title="Compare the fork with production">
@@ -517,8 +487,6 @@ Comparison, using runs 2 and 3:
 - Execution time: about 150 ms on production against about 25 ms on the fork, so the fork is about 6× faster.
 - Execution buffers: 38,000 to 40,000 on production against a steady 1,046 on the fork, about 37× fewer. Against run 1's 48,215, it's about 46× fewer.
 ```
-
-Claude Code can show these tool calls as failed. On the test run, the agent returned its plan summary through a raised error, and nothing failed on either service.
 
 </NumberedItem>
 </NumberedList>
@@ -543,12 +511,12 @@ ALTER TABLE
 DO
 ```
 
-The file runs as one transaction. On the test service, it took 14 seconds, and the dashboard query waited for it, with its slowest run at 13.3 seconds.
+The file runs as one transaction, and the dashboard query in the second terminal pauses until it finishes.
 
 </NumberedItem>
-<NumberedItem title="Check the dashboard query (in the third terminal)">
+<NumberedItem title="Check the dashboard query (in the second terminal)">
 
-Verify the dashboard query in the third terminal now runs in less time.
+Verify the dashboard query in the second terminal now runs in less time.
 
 ```
     11/26/2026 2:03:57 PM (every 1s)
@@ -559,22 +527,6 @@ Verify the dashboard query in the third terminal now runs in less time.
 (1 row)
 
 Time: 96.888 ms
-    11/26/2026 2:03:58 PM (every 1s)
-
-  avg_temperature   |  max_temperature
---------------------+-------------------
- 38.247549846810315 | 71.29281018685788
-(1 row)
-
-Time: 97.697 ms
-    11/26/2026 2:03:59 PM (every 1s)
-
-  avg_temperature   |  max_temperature
---------------------+-------------------
- 38.247549846810315 | 71.29281018685788
-(1 row)
-
-Time: 95.143 ms
 ```
 
 </NumberedItem>
@@ -593,9 +545,9 @@ Someone applied segmentby.sql to production at 18:58:43 UTC. I didn't run it. Si
 ```
 
 </NumberedItem>
-<NumberedItem title="Delete the fork">
+<NumberedItem title="Clean up">
 
-Stop the dashboard query in the third terminal with Ctrl+C. Then delete the fork, which is a billable service, with this command in the first terminal:
+Stop the dashboard query in the second terminal with Ctrl+C. Then delete the fork with this command in the first terminal:
 
 ```bash
 tiger service delete <fork-service-id>
@@ -608,6 +560,8 @@ Are you sure you want to delete service 'standard-fork-tutorial-db' (q1pt9dvxao)
 Type the service ID 'q1pt9dvxao' to confirm: q1pt9dvxao
 Service 'standard-fork-tutorial-db' (q1pt9dvxao) deleted.
 ```
+
+The `read_only` option stays set to `prod` in your Tiger CLI configuration, so services tagged `PROD` stay read-only for your agents. To turn it off, run `tiger config set read_only off`. If you created the service only for this tutorial, delete it in [Tiger Console](https://console.cloud.tigerdata.com/dashboard/services).
 
 </NumberedItem>
 </NumberedList>
@@ -624,16 +578,9 @@ These problems can come up while you follow the tutorial.
 
 ## Recap
 
-In this tutorial, you found a slow query on a production service with an AI agent that could only read it, tested a fix on a fork, and applied the fix yourself. Use this table as a reference for each stage.
+In this tutorial, you found a slow query on a production service with an AI agent that could only read it, tested a fix on a fork, and applied the fix yourself.
 
-| Section | Technique | Why it matters |
-|---|---|---|
-| Set up the agent | A `PROD` tag on the service and `read_only` set to `prod` | The agent reads production and can't write to it |
-| Find the slow query | Service metrics, logs, `pg_stat_statements`, and a query plan, all from prompts | The diagnosis needs no write access |
-| Test the fix on a fork | A fork tagged `DEV` | The agent runs the change on a copy of production's data |
-| Apply the fix to production | A reviewed file and `TIGER_READ_ONLY=off` on one command | You make the production write, and the saved setting stays in place |
-
-These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1, with Tiger CLI 0.30.0 and Claude Code 2.1.332. Buffers count 8 KB blocks read from memory and disk, and millicores are thousandths of one CPU.
+These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1, with Tiger CLI 0.30.0 and Claude Code 2.1.332, while one dashboard query repeated every second.
 
 | Measurement | Before | After | Change |
 |---|---|---|---|
@@ -641,25 +588,19 @@ These measurements were collected from a test Tiger Cloud service with 8 CPUs an
 | Dashboard query buffers | 48,215 | 1,046 | 46 times fewer |
 | Service CPU usage | 465 millicores | 90 millicores | 5.1 times lower |
 
-Query times are the execution time that `EXPLAIN ANALYZE` reports, as the median of five runs. CPU usage is the three-minute average while one dashboard query repeated every second.
+Each added dashboard panel or viewer repeats the query, so the saving grows with the number of dashboards that read the table.
 
-Before the fix, every refresh of the dashboard panel read 48,215 buffers to return one row. After the fix, the same refresh reads 1,046 buffers. Each added panel or viewer repeats the query, so the saving grows with the number of dashboards that read the table.
+In `psql`, each run fell from a median of 213 ms to 94 ms, because planning for 523 chunks takes about 50 ms of every run and the fix leaves it unchanged. A time filter on the query reduces the planning time, as [Diagnose and fix a slow hypertable query](https://www.tigerdata.com/docs/learn/tutorials/diagnose-and-fix-a-slow-hypertable-query) shows.
 
-The time each run takes in `psql` fell less, from a median of 213 ms to 94 ms. Planning for 523 chunks takes about 50 ms of every run, and the fix leaves it unchanged. A time filter on the query reduces the planning time, as [Diagnose and fix a slow hypertable query](https://www.tigerdata.com/docs/learn/tutorials/diagnose-and-fix-a-slow-hypertable-query) shows.
-
-You made every write to the production service yourself. You loaded the data and converted the chunks from `psql`, and you ran `segmentby.sql` with Tiger CLI. The agent's only writes went to the fork. The same sequence of a read-only diagnosis, a fork, a reviewed file, and your own write also works for other changes, such as a new index or a retention policy.
+You made every write to the production service yourself. The agent's only writes went to the fork. The same sequence of a read-only diagnosis, a fork, a reviewed file, and your own write also works for other changes, such as a new index or a retention policy.
 
 For your next step, tag one of your own production services `PROD`, set `read_only` to `prod`, and give the agent the prompts from [Find the slow query](#find-the-slow-query). The prompts only read from the service, so they are safe to run against production.
 
 ### Learn more
 
-- [Tiger CLI and Tiger MCP](https://www.tigerdata.com/docs/learn/tiger-cli-mcp)
-- [Integrate Tiger Cloud with your AI agent](https://www.tigerdata.com/docs/get-started/quickstart/mcp-cli)
 - [Best practices for AI agents](https://www.tigerdata.com/docs/build/tiger-cli-mcp/agent-best-practices)
 - [Tiger CLI and MCP cookbook](https://www.tigerdata.com/docs/build/tiger-cli-mcp/cookbook)
 - [Tiger CLI reference](https://www.tigerdata.com/docs/reference/tiger-cloud/tiger-cli)
 - [Tiger MCP reference](https://www.tigerdata.com/docs/reference/tiger-cloud/tiger-mcp)
 - [Fork services](https://www.tigerdata.com/docs/deploy/tiger-cloud/tiger-cloud-aws/service-management/fork-services)
 - [Set up hypercore](https://www.tigerdata.com/docs/build/columnar-storage/setup-hypercore)
-- [`ALTER TABLE` (hypercore)](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/alter_table)
-- [`pg_stat_statements`](https://www.postgresql.org/docs/current/pgstatstatements.html) in the PostgreSQL documentation
