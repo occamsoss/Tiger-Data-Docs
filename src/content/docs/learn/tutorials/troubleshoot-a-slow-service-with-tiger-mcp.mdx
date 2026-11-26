@@ -5,7 +5,7 @@ description: Find and fix a slow query on a production Tiger Cloud service from 
 
 import { NumberedList, NumberedItem } from "@components/NumberedList";
 
-This tutorial shows you how to fix a slow production Tiger Cloud service from an AI agent with Tiger CLI and Tiger MCP. It uses a sample manufacturing dataset that has hourly readings from ten sensors on each of five factory machines, over ten years, with about 4.4 million records in total. The agent is Claude Code.
+This tutorial shows you how to find and fix a slow query on a production Tiger Cloud service with an AI agent, Tiger CLI, and Tiger MCP. You will load ten years of factory sensor data, start a dashboard query that runs slowly, and have the agent, Claude Code, find it and test a fix on a fork.
 
 If you want an overview of Tiger CLI and Tiger MCP first, see [Tiger CLI and Tiger MCP](https://www.tigerdata.com/docs/learn/tiger-cli-mcp).
 
@@ -274,7 +274,7 @@ tiger auth login
 tiger service list
 ```
 
-If Tiger CLI asks which services should be protected from writes, press `q` to decide later. You set this option in a later step.
+If Tiger CLI asks which services should be protected from writes, press `q` to decide later. You will set this option in a later step.
 
 Verify the output lists your service, and note its service ID for the steps that follow.
 
@@ -331,7 +331,7 @@ tiger mcp install claude-code
 </NumberedItem>
 <NumberedItem title="Start Claude Code (in a third terminal)">
 
-Open a third terminal in the same directory as the first and start Claude Code with the `claude` command. The agent writes a file to this directory later, and you run that file from the first terminal. Approve the Tiger MCP tool calls when Claude Code asks for permission.
+Open a third terminal in the same directory as the first and start Claude Code with the `claude` command. The agent will write a file to this directory later, and you will run that file from the first terminal. Approve the Tiger MCP tool calls when Claude Code asks for permission.
 
 </NumberedItem>
 <NumberedItem title="Confirm the agent can read and can't write">
@@ -348,7 +348,7 @@ Verify the agent lists your service. Then replace `<service-id>` with your servi
 Run CREATE TABLE agent_write_test (id int) on service <service-id> and show me the exact result.
 ```
 
-Verify the agent reports that the server refused the statement with a read-only error. Example reply, trimmed to the error:
+Verify the agent reports that the server refused the statement with a read-only error. Here's an example reply, trimmed to the error:
 
 ```
 The statement failed, and the table doesn't exist. Here is the exact result:
@@ -370,7 +370,7 @@ If you started the dashboard query less than five minutes ago, wait until five m
 For service <service-id>, show the CPU usage for the past hour against the service's total CPU, and tell me the average for the past three minutes. Then summarize the service logs for the same hour.
 ```
 
-Verify the agent reports the CPU usage and summarizes the logs. Example reply, trimmed to the CPU average:
+Verify the agent reports the CPU usage and summarizes the logs. Here's an example reply, trimmed to the CPU average:
 
 ```
 CPU on tutorial-db jumped about 50-fold at 18:07 UTC and has stayed there. Even so, the service is using under 6% of its 8 cores. Average over the last three minutes: 468 millicores, 5.9% of total CPU.
@@ -385,7 +385,7 @@ Ask the agent for the slowest statements and a plan with this prompt:
 On service <service-id>, list the five SELECT statements with the highest total execution time in pg_stat_statements. The first one has placeholders in place of its values. Find the same statement in pg_stat_activity to get the values, run EXPLAIN (ANALYZE, BUFFERS) on it, and tell me where it spends its time.
 ```
 
-Verify the agent names the dashboard query and reports that the query reads every chunk and discards most of the rows it decompresses. Example reply, trimmed to the summary:
+Verify the agent names the dashboard query and reports that the query reads every chunk and discards most of the rows it decompresses. Here's an example reply, trimmed to the summary:
 
 ```
 The top statement is a monitoring query that runs about every 1.2 seconds. Each run reads all 523 chunks of sensor_data, decompresses about 4.4 million rows and throws away 98% of them. It's also the most likely cause of the sustained CPU from the last question.
@@ -403,7 +403,7 @@ A [`segmentby`](https://www.tigerdata.com/docs/build/columnar-storage/setup-hype
 <NumberedList>
 <NumberedItem title="Fork the service">
 
-The fork is a second billable service, which you delete at the end of this tutorial. Ask the agent to fork the production service with this prompt:
+The fork is a second billable service, which you will delete at the end of this tutorial. Ask the agent to fork the production service with this prompt:
 
 ```text
 Fork service <service-id> at its current state, wait until the fork is ready, and tell me the fork's service ID.
@@ -480,7 +480,7 @@ Ask the agent to compare the two services with this prompt:
 Run EXPLAIN (ANALYZE, BUFFERS) on the dashboard query on the fork <fork-service-id> and on service <service-id>. Compare the buffers and the execution time.
 ```
 
-Verify the agent reports fewer buffers and a shorter execution time on the fork than on production. Example reply, trimmed to the comparison:
+Verify the agent reports fewer buffers and a shorter execution time on the fork than on production. Here's an example reply, trimmed to the comparison:
 
 ```
 Comparison, using runs 2 and 3:
@@ -538,7 +538,7 @@ Wait about five minutes, so the CPU metric covers the time after the change. The
 Run EXPLAIN (ANALYZE, BUFFERS) on the dashboard query on service <service-id> and compare it with the plan from before the change. Then tell me the average CPU usage for the past three minutes and compare it with the average from before the change.
 ```
 
-Verify the agent reports fewer buffers, a shorter execution time, and lower CPU usage. Example reply, trimmed to the summary:
+Verify the agent reports fewer buffers, a shorter execution time, and lower CPU usage. Here's an example reply, trimmed to the summary:
 
 ```
 Someone applied segmentby.sql to production at 18:58:43 UTC. I didn't run it. Since then, the dashboard query runs about 6× faster with about 37× fewer buffers, and CPU has dropped by about 80%.
@@ -579,18 +579,6 @@ These problems can come up while you follow the tutorial.
 ## Recap
 
 In this tutorial, you found a slow query on a production service with an AI agent that could only read it, tested a fix on a fork, and applied the fix yourself.
-
-These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1, with Tiger CLI 0.30.0 and Claude Code 2.1.332, while one dashboard query repeated every second.
-
-| Measurement | Before | After | Change |
-|---|---|---|---|
-| Dashboard query execution time | 151.9 ms | 31.0 ms | 4.9 times shorter |
-| Dashboard query buffers | 48,215 | 1,046 | 46 times fewer |
-| Service CPU usage | 465 millicores | 90 millicores | 5.1 times lower |
-
-Each added dashboard panel or viewer repeats the query, so the saving grows with the number of dashboards that read the table.
-
-In `psql`, each run fell from a median of 213 ms to 94 ms, because planning for 523 chunks takes about 50 ms of every run and the fix leaves it unchanged. A time filter on the query reduces the planning time, as [Diagnose and fix a slow hypertable query](https://www.tigerdata.com/docs/learn/tutorials/diagnose-and-fix-a-slow-hypertable-query) shows.
 
 You made every write to the production service yourself. The agent's only writes went to the fork. The same sequence of a read-only diagnosis, a fork, a reviewed file, and your own write also works for other changes, such as a new index or a retention policy.
 
