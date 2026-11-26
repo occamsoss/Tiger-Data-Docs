@@ -58,25 +58,9 @@ CREATE TABLE sensor_data (
 [`CREATE TABLE ... WITH`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/create_table) also adds a [columnstore policy](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/add_columnstore_policy), which converts each chunk to the columnstore after seven days, the default chunk interval, and groups the converted rows by machine.
 
 </NumberedItem>
-<NumberedItem title="Save the connection details and the message rate">
-
-Create a directory for this tutorial's files. In it, save your service's connection details and the message rate in a file named `.env`, replacing `<host>`, `<port>`, and `<password>` with the values from your configuration file:
-
-```bash
-PGHOST=<host>
-PGPORT=<port>
-PGDATABASE=tsdb
-PGUSER=tsdbadmin
-PGPASSWORD=<password>
-MESSAGE_RATE=2000
-```
-
-`MESSAGE_RATE` is the number of messages the sensors publish each second, and this tutorial uses 2,000.
-
-</NumberedItem>
 <NumberedItem title="Create the sensor publisher">
 
-Save this script as `publisher.py` in the same directory. It publishes each reading as a JSON message to the topic `factory/<machine>/<sensor>`:
+Create a directory for this tutorial's files and save this script in it as `publisher.py`. It publishes each reading as a JSON message to the topic `factory/<machine>/<sensor>`:
 
 ```python
 """
@@ -151,7 +135,6 @@ services:
 
   node-red:
     image: nodered/node-red
-    env_file: .env
     ports:
       - "1880:1880"
     volumes:
@@ -162,7 +145,7 @@ services:
   publisher:
     image: python:3.13-slim
     environment:
-      MESSAGE_RATE: ${MESSAGE_RATE}
+      MESSAGE_RATE: 2000
     volumes:
       - ./publisher.py:/publisher.py
     command: sh -c "pip install --quiet paho-mqtt && python /publisher.py"
@@ -172,6 +155,8 @@ services:
 volumes:
   node-red-data:
 ```
+
+`MESSAGE_RATE` is the number of messages the sensors publish each second, and this tutorial uses 2,000.
 
 Open a second terminal in that directory and start the three containers by running this command:
 
@@ -188,10 +173,10 @@ docker compose exec -T mosquitto mosquitto_sub -t "factory/#" -v -C 20
 Verify the output shows a reading from each of the four sensors on all five machines. This example shows the first four of the 20 lines:
 
 ```
-factory/machine1/temperature {"time": "2026-11-26T20:43:33.059981+00:00", "value": 70.3}
-factory/machine1/vibration {"time": "2026-11-26T20:43:33.059981+00:00", "value": 7.99}
-factory/machine1/pressure {"time": "2026-11-26T20:43:33.059981+00:00", "value": 5.15}
-factory/machine1/power_consumption {"time": "2026-11-26T20:43:33.059981+00:00", "value": 39.02}
+factory/machine1/temperature {"time": "2026-11-26T22:00:14.461024+00:00", "value": 65.9}
+factory/machine1/vibration {"time": "2026-11-26T22:00:14.461024+00:00", "value": 7.78}
+factory/machine1/pressure {"time": "2026-11-26T22:00:14.461024+00:00", "value": 5.09}
+factory/machine1/power_consumption {"time": "2026-11-26T22:00:14.461024+00:00", "value": 38.04}
 ```
 
 </NumberedItem>
@@ -225,16 +210,16 @@ In the main menu, select `Import`, paste this JSON, and click `Import`:
 </NumberedItem>
 <NumberedItem title="Set the PostgreSQL connection">
 
-Double-click the `Insert` node and click the pencil button next to `Server`. Set these fields so that the node reads the connection details from `.env`.
+Double-click the `Insert` node and click the pencil button next to `Server`. Set these fields with the connection details from your configuration file. For `SSL`, change the field's type to `JSON` first.
 
-| Tab | Field | Type | Value |
-|---|---|---|---|
-| `Connection` | `Host` | `env variable` | `PGHOST` |
-| `Connection` | `Port` | `env variable` | `PGPORT` |
-| `Connection` | `Database` | `env variable` | `PGDATABASE` |
-| `Connection` | `SSL` | `JSON` | `{"rejectUnauthorized": false}` |
-| `Security` | `User` | `env variable` | `PGUSER` |
-| `Security` | `Password` | `env variable` | `PGPASSWORD` |
+| Tab | Field | Value |
+|---|---|---|
+| `Connection` | `Host` | Your service's host |
+| `Connection` | `Port` | Your service's port |
+| `Connection` | `Database` | `tsdb` |
+| `Connection` | `SSL` | `{"rejectUnauthorized": false}` |
+| `Security` | `User` | `tsdbadmin` |
+| `Security` | `Password` | Your service's password |
 
 Click `Update`, `Done`, and then `Deploy`.
 
@@ -257,11 +242,11 @@ Verify the output shows the machine and the sensor from each message's topic, an
 ```
              time             | device_id |     tag     | value
 ------------------------------+-----------+-------------+-------
- 2026-11-26 20:44:42.95007+00 | machine1  | temperature | 67.68
- 2026-11-26 20:44:42.95007+00 | machine3  | pressure    |  4.96
- 2026-11-26 20:44:42.95007+00 | machine2  | temperature | 64.55
- 2026-11-26 20:44:42.95007+00 | machine1  | pressure    |  5.22
- 2026-11-26 20:44:42.95007+00 | machine4  | temperature | 66.81
+ 2026-11-26 22:01:24.43111+00 | machine1  | vibration   |  7.97
+ 2026-11-26 22:01:24.43111+00 | machine1  | pressure    |  4.82
+ 2026-11-26 22:01:24.43111+00 | machine2  | vibration   |  8.65
+ 2026-11-26 22:01:24.43111+00 | machine1  | temperature | 70.65
+ 2026-11-26 22:01:24.43111+00 | machine3  | vibration   |  7.76
 (5 rows)
 ```
 
@@ -307,13 +292,13 @@ Verify that `rows_per_second` is below the message rate and `lag_seconds` is abo
 ```
  rows_per_second | lag_seconds
 -----------------+-------------
-            1621 |        10.2
+            1609 |        10.5
 (1 row)
 ```
 
 The flow sends one `INSERT` for each message and waits for the reply, on at most ten connections, so the round trip to your service limits its rate. A message that waits more than ten seconds for a connection fails with `timeout exceeded when trying to connect`. The lag stays near ten seconds, and the flow loses every reading that times out.
 
-> **Note:** If `rows_per_second` matches the message rate, the network path from your computer to your service is fast enough for single-row inserts at this rate. Raise `MESSAGE_RATE` in `.env`, run `docker compose up -d` again, and repeat this section.
+> **Note:** If `rows_per_second` matches the message rate, the network path from your computer to your service is fast enough for single-row inserts at this rate. Raise `MESSAGE_RATE` in `compose.yaml`, run `docker compose up -d` again, and repeat this section.
 
 </NumberedItem>
 </NumberedList>
@@ -380,7 +365,7 @@ Verify that `rows_per_second` matches the message rate and `lag_seconds` is unde
 ```
  rows_per_second | lag_seconds
 -----------------+-------------
-            2000 |         0.5
+            2000 |         0.9
 (1 row)
 ```
 
@@ -524,14 +509,14 @@ In this tutorial, you wrote MQTT sensor messages to a hypertable with a Node-RED
 | Retry failed inserts | `catch` and `delay` nodes that send a failed batch back to the PostgreSQL node | The flow keeps every batch through a database outage of up to 45 seconds |
 | Add a continuous aggregate and a dashboard | A continuous aggregate with real-time aggregation | The chart reads one row for each machine and minute, including the current minute |
 
-These measurements were collected with Node-RED 5.0.10 and `node-red-contrib-postgresql` 0.16.2 running in Docker on a desktop with an AMD Ryzen 9 5900HX and 15 GiB of memory for Docker, and a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. A round trip from the computer to the service took about 5 ms, and the computer's clock was within 0.2 seconds of the service's clock.
+These measurements were collected with Node-RED 5.0.10 and `node-red-contrib-postgresql` 0.16.2 running in Docker on a desktop with an AMD Ryzen 9 5900HX and 15 GiB of memory for Docker, and a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. A round trip from the computer to the service took about 5 ms. The computer's clock was 0.5 seconds behind the service's clock, so each lag figure includes that difference.
 
 | Flow | Messages published per second | Rows inserted per second | Lag in seconds | Meets the target |
 |---|---|---|---|---|
-| One row per message | 2,000 | 1,621 | 10.2 | No |
-| Batched | 2,000 | 2,000 | 0.5 | Yes |
+| One row per message | 2,000 | 1,609 | 10.5 | No |
+| Batched | 2,000 | 2,000 | 0.9 | Yes |
 
-On the test setup, the one-row flow inserted 1,621 of the 2,000 readings published each second, and it lost the others when they timed out after ten seconds in the queue. The batched flow sent the same readings in two statements per second, and every reading reached the hypertable within one second. The round trip to the database sets the rate of a one-row flow. With the test setup's round trip of 5 ms, that rate stayed near 1,600 rows per second, and a longer round trip lowers it. In a separate run on the same setup, the batched flow also inserted every reading at 4,000 and 8,000 messages per second.
+On the test setup, the one-row flow inserted 1,609 of the 2,000 readings published each second, and it lost the others when they timed out after ten seconds in the queue. The batched flow sent the same readings in two statements per second, and every reading reached the hypertable within one second. The round trip to the database sets the rate of a one-row flow. With the test setup's round trip of 5 ms, that rate stayed near 1,600 rows per second, and a longer round trip lowers it. In a separate run on the same setup, the batched flow also inserted every reading at 4,000 and 8,000 messages per second.
 
 The batching function works with any Node-RED input that sends one message for each reading, such as the `http in` or `websocket in` node, once you change the lines that take the row from the message.
 
