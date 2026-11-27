@@ -393,6 +393,7 @@ export default defineConfig({
                 { label: "Tiger Data cookbook", link: "/learn/tutorials/cookbook" },
                 { label: "Diagnose and fix a slow hypertable query", link: "learn/tutorials/diagnose-and-fix-a-slow-hypertable-query" },
                 { label: "Migrate a large production table to a hypertable while it receives writes", link: "learn/tutorials/migrate-a-table-to-a-hypertable" },
+                { label: "Design a schema for Tiger Data", link: "learn/tutorials/design-a-schema-for-tiger-data" },
               ],
             },
             {
