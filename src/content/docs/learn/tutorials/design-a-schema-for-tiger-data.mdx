@@ -1,11 +1,11 @@
 ---
 title: Design a schema for Tiger Data
-description: Design a hypertable schema in three versions and measure each one with the same five queries, using three months of New York City 311 service requests
+description: Design a hypertable schema in stages and measure each stage with the same five queries, using three months of New York City 311 service requests
 ---
 
 import { NumberedList, NumberedItem } from "@components/NumberedList";
 
-This tutorial shows you how to design a schema for Tiger Data in three versions, and how to measure each version with the same five queries. It uses three months of [311 service requests](https://data.cityofnewyork.us/Social-Services/311-Service-Requests-from-2020-to-Present/erm2-nwe9/about_data) from NYC Open Data, which is about 1 million requests that New York City residents sent to city agencies.
+This tutorial shows you how to design a schema for Tiger Data in stages, and how to measure each stage with the same five queries. You will create three versions of one table, where version 1 is a plain PostgreSQL table, version 2 has column types that fit the data, and version 3 is a hypertable that will then get keys and the columnstore. The data is three months of [311 service requests](https://data.cityofnewyork.us/Social-Services/311-Service-Requests-from-2020-to-Present/erm2-nwe9/about_data) from NYC Open Data, which is about 1 million requests that New York City residents sent to city agencies.
 
 If you want an overview of the decisions in a data model first, see [Design your data model](https://www.tigerdata.com/docs/learn/data-model/design-your-data-model).
 
@@ -40,7 +40,7 @@ Initializing `DATABASE_URL` is required for the loading script in Step 4.
 </NumberedItem>
 <NumberedItem title="Create the version 1 table">
 
-Create the first version of the table by running this SQL in your `psql` session:
+Create version 1 of the table by running this SQL in your `psql` session:
 
 ```sql
 CREATE TABLE requests_v1 (
@@ -65,7 +65,7 @@ Version 1 takes the column types a quick import would pick, with no keys and no 
 </NumberedItem>
 <NumberedItem title="Load the 311 dataset">
 
-Type `\q` to quit `psql`. Stay in the same terminal, so `DATABASE_URL` keeps its value, and download the requests created from August through October 2026 with this command, which may take a few minutes:
+Type `\q` to quit `psql`. Stay in the same terminal, so `DATABASE_URL` keeps its value, and download the 311 requests created from August through October 2026 from NYC Open Data with this command, which may take a few minutes:
 
 ```bash
 curl -G "https://data.cityofnewyork.us/resource/erm2-nwe9.csv" \
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     main()
 ```
 
-The script shifts every timestamp forward by the same amount so the newest request falls in the current hour in UTC. The shift makes queries about today and the past 30 days return data.
+The script shifts every timestamp forward by the same amount so the newest request falls in the current hour in UTC. The shift makes queries about today and the past 30 days return data. Those queries count back from the current time, so complete the tutorial on the day you load the data.
 
 Verify the script loaded about 1 million rows into the table.
 
@@ -437,7 +437,7 @@ Verify Queries 1 and 2 read far fewer buffers than on version 2.
 (1 row)
 ```
 
-TimescaleDB stores each 7 days of requests in a separate chunk, and reads only the chunks that a query's time filter covers. Query 2 asks for one day, so it reads one chunk. The table is larger than version 2 because a hypertable has an index on its partition column by default.
+TimescaleDB stores the requests in 7-day chunks, and reads only the chunks that a query's time filter covers. Query 2 asks for one day, so it reads one chunk. The table is larger than version 2 because a hypertable has an index on its partition column by default.
 
 </NumberedItem>
 <NumberedItem title="Check the chunk interval">
@@ -537,7 +537,7 @@ The [columnstore](https://www.tigerdata.com/docs/learn/columnar-storage/understa
 <NumberedList>
 <NumberedItem title="Count the rows for each candidate column">
 
-Count the rows in 7 days of requests, and the average for each value of four candidate `segmentby` columns, by running this SQL:
+Count the rows in a 7-day range, which is what one chunk holds, and the average number of rows for each value of four candidate `segmentby` columns, by running this SQL:
 
 ```sql
 SELECT count(*) AS rows,
@@ -960,16 +960,17 @@ In an application, run the two queries one after the other and pass the bounds a
 
 ## Troubleshooting
 
-These problems can come up while you follow the tutorial.
+These problems can come up while you follow the tutorial:
 
-- **A query fails with a syntax error at or near `:`.** A `psql` variable is missing, usually after a reconnect. Run the statement that ends in `\gset` again. [A lookup with no time filter](#a-lookup-with-no-time-filter) sets `lookup_key` and `lookup_time`, and [Time bounds from a join](#time-bounds-from-a-join) sets `period_start` and `period_end`.
-- **A plan shows a different scan type from the tutorial.** PostgreSQL versions and service sizes can choose different scan types. Compare the chunk lines and the buffer counts, which show the same result in either case.
+- **The loading script stops with a `KeyError`, a `ValueError`, or a `TypeError`, or it loads far fewer than 1 million rows.** The download stopped early or returned an error message, so `service_requests.csv` is incomplete. Run the `curl` command in [Set up the data](#set-up-the-data) again, run `TRUNCATE requests_v1;`, then run the script again.
+- **The loading script says `requests_v1` already has rows.** An earlier run of the script loaded the table. To load the data again, run `TRUNCATE requests_v1;`, then run the script again.
+- **A query fails with a syntax error at or near `:`.** A `psql` variable is missing, usually after a reconnect. Run the SQL block that contains `\gset` again, in [A lookup with no time filter](#a-lookup-with-no-time-filter) or [Time bounds from a join](#time-bounds-from-a-join).
 
 ## Recap
 
-In this tutorial, you designed a schema in three versions and measured each one with the same five queries. Use this table to pair each decision with the result it changed.
+In this tutorial, you designed a schema in stages and measured each stage with the same five queries. Use this table to pair each decision with the result it changed.
 
-| Decision | Choice in this tutorial | Result it changed |
+| Decision | In this tutorial | Result it changed |
 |---|---|---|
 | Column types | `timestamptz`, the smallest numeric types that fit, `NOT NULL`, and a lookup table | A smaller table |
 | Partition column and chunk interval | `created_date` and 7 days | A query with a time filter reads only the chunks in its range |
@@ -977,7 +978,7 @@ In this tutorial, you designed a schema in three versions and measured each one 
 | `segmentby` and `orderby` | `agency`, then `created_date DESC` and `unique_key` | A smaller table and a faster 30-day aggregate |
 | Query shape | A time filter the planner knows before the query runs, and `DISTINCT ON` the `segmentby` column | Fewer chunks and buffers read |
 
-These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. Times are the `execution_ms` values that `benchmark()` returned.
+These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. Times are the `execution_ms` values that `benchmark()` returned at each stage.
 
 | Measurement | Version 1 | Version 2 | Version 3 | Version 3 with keys | Version 3 in the columnstore |
 |---|---|---|---|---|---|
@@ -988,9 +989,9 @@ These measurements were collected from a test Tiger Cloud service with 8 CPUs an
 | Query 4, one request | 39 ms | 35 ms | 25 ms | 0.37 ms | 0.70 ms |
 | Query 5, one agency | 35 ms | 39 ms | 18 ms | 18 ms | 0.88 ms |
 
-Column types made the table about 27% smaller, from 176 MB to 129 MB, and every query still read the whole table. Partitioning shortened the one-day query from 36 ms to 3.6 ms, because the query reads one chunk out of 14. The difference grows with the table. A query on a regular table reads more rows every month, and a one-day query on the hypertable keeps reading one chunk. The hypertable's indexes brought the table to 196 MB, and the columnstore then reduced it to 31 MB and shortened the 30-day aggregate from 34 ms to 12 ms. Queries 1 and 4 return a few rows, and they ran faster through the rowstore's indexes.
+Column types made the table about 27% smaller, but every query still read the whole table. Partitioning made the one-day query 10 times faster, because the query reads one chunk out of 14, and that difference grows as the table grows. The columnstore reduced the table to about one sixth of its size and made the 30-day aggregate about 3 times faster. Queries 1 and 4 return a few rows, so they ran faster through the rowstore's indexes.
 
-For your next step, write the three versions for one of your own tables, and replace the five queries in `benchmark()` with your five most frequent queries. The version 1 numbers give you a baseline, so you can see what each decision changes on your own data before you change a production table.
+For your next step, take one of your own tables through the same stages, and replace the five queries in `benchmark()` with your five most frequent queries. The numbers from the first stage give you a baseline, so you can see what each decision changes on your own data before you change a production table.
 
 ### Learn more
 
