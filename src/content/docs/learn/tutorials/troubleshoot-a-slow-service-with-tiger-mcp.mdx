@@ -57,7 +57,7 @@ CREATE TABLE sensor_data (
 );
 ```
 
-The empty `tsdb.segmentby` leaves the [columnstore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore) with no `segmentby` column, which is the problem you will fix later in this tutorial.
+The empty `tsdb.segmentby` leaves the [columnstore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore) with no `segmentby` column. That makes the dashboard query you will start in Step 7 slow, and it is the problem you will fix later in this tutorial.
 
 </NumberedItem>
 <NumberedItem title="Load the manufacturing dataset">
@@ -230,9 +230,9 @@ DO
 ```
 
 </NumberedItem>
-<NumberedItem title="Start a dashboard query (in a second terminal)">
+<NumberedItem title="Start the slow dashboard query (in a second terminal)">
 
-Open a second terminal and start a new `psql` session. Turn on timing and repeat a dashboard query, the ten-year average and highest temperature of `machine1`, every second with this SQL:
+This step starts the slow query that the agent will find later in this tutorial. The query asks for the ten-year average and highest temperature of `machine1`, and the missing `segmentby` column makes it read every row in the table. Open a second terminal, start a new `psql` session, turn on timing, and repeat the query every second with this SQL:
 
 ```sql
 \timing on
@@ -246,7 +246,7 @@ WHERE device_id = 'machine1'
 
 The query plays the role of a dashboard panel that refreshes every second. Leave it running for the rest of the tutorial.
 
-Verify each run prints its time.
+Verify each run prints its time, and note the time. You will compare it with the time after the fix.
 
 ```
     11/26/2026 1:13:26 PM (every 1s)
@@ -391,10 +391,6 @@ Verify the agent names the dashboard query and reports that the query reads ever
 The top statement is a monitoring query that runs about every 1.2 seconds. Each run reads all 523 chunks of sensor_data, decompresses about 4.4 million rows and throws away 98% of them. It's also the most likely cause of the sustained CPU from the last question.
 ```
 
-Claude Code may show some of the agent's tool calls as failed, because the agent can return its plan summary through a raised error.
-
-A [`segmentby`](https://www.tigerdata.com/docs/build/columnar-storage/setup-hypercore) setting groups compressed rows by the columns it names, so a query for one machine and sensor reads only that group.
-
 </NumberedItem>
 </NumberedList>
 
@@ -403,7 +399,7 @@ A [`segmentby`](https://www.tigerdata.com/docs/build/columnar-storage/setup-hype
 <NumberedList>
 <NumberedItem title="Fork the service">
 
-The fork is a second billable service, which you will delete at the end of this tutorial. Ask the agent to fork the production service with this prompt:
+A fork is a copy of your production service and its data, where the agent can test a change while production stays as it is. Ask the agent to create one with this prompt:
 
 ```text
 Fork service <service-id> at its current state, wait until the fork is ready, and tell me the fork's service ID.
@@ -411,7 +407,7 @@ Fork service <service-id> at its current state, wait until the fork is ready, an
 
 Verify the agent reports a new service ID, and note it. The fork can take several minutes.
 
-Tiger MCP tags the fork `DEV`, so the agent can write to it and still can't write to the production service.
+Tiger MCP tags the fork `DEV`, so read-only mode lets the agent write to it. Tiger Cloud bills the fork as a separate service, so you will delete it at the end of this tutorial.
 
 </NumberedItem>
 <NumberedItem title="Write the change to a file">
@@ -422,12 +418,12 @@ Ask the agent to write the change with this prompt:
 Use the setup-timescaledb-hypertables skill to choose segmentby columns for the sensor_data hypertable on service <service-id>, so that the dashboard query reads only the rows it needs. Write the SQL to segmentby.sql. The file must set the new segmentby columns, then convert every chunk to the rowstore and back to the columnstore. Use no transaction control statements. Don't run the file.
 ```
 
-TimescaleDB applies a new `segmentby` setting only to chunks it converts after the change, which is why the file converts the existing chunks again.
+The prompt asks for two things in `segmentby.sql`. The [`segmentby`](https://www.tigerdata.com/docs/build/columnar-storage/setup-hypercore) setting stores the rows for each machine and sensor together, so a query for one of them reads only its own rows. The prompt also asks the file to convert every chunk to the rowstore and back to the columnstore, because TimescaleDB applies a new `segmentby` setting to a chunk only when it converts that chunk.
 
 </NumberedItem>
 <NumberedItem title="Review the file">
 
-Open `segmentby.sql` and check it against this list.
+Open `segmentby.sql` and confirm each of these points:
 
 - It sets `segmentby` on `sensor_data` to `device_id, tag`, the two columns the dashboard query filters on. An `orderby` of `time DESC`, as in the example, is the order the chunks already use.
 - It converts every chunk to the rowstore and back to the columnstore.
@@ -561,7 +557,7 @@ Type the service ID 'q1pt9dvxao' to confirm: q1pt9dvxao
 Service 'standard-fork-tutorial-db' (q1pt9dvxao) deleted.
 ```
 
-The `read_only` option stays set to `prod` in your Tiger CLI configuration, so services tagged `PROD` stay read-only for your agents. To turn it off, run `tiger config set read_only off`. If you created the service only for this tutorial, delete it in [Tiger Console](https://console.cloud.tigerdata.com/dashboard/services).
+Read-only mode stays on for services tagged `PROD` until you run `tiger config set read_only off`. If you created the service only for this tutorial, delete it in [Tiger Console](https://console.cloud.tigerdata.com/dashboard/services).
 
 </NumberedItem>
 </NumberedList>
@@ -570,11 +566,11 @@ The `read_only` option stays set to `prod` in your Tiger CLI configuration, so s
 
 These problems can come up while you follow the tutorial.
 
-- **The agent shows no Tiger MCP tools after the install.** Claude Code loads Tiger MCP when it starts. Quit Claude Code, start it again, and ask it whether the Tiger MCP server is active.
-- **An agent write succeeds on your service.** The service still has the `DEV` tag, and `read_only` set to `prod` protects only services tagged `PROD`. Drop the table the agent created, then tag the service as described in [Set up the agent](#set-up-the-agent).
+- **The agent shows no Tiger MCP tools after the install.** Claude Code was running when you installed Tiger MCP, and it loads Tiger MCP only when it starts. Quit Claude Code and start it again.
+- **An agent write succeeds on your service.** The service still has the `DEV` tag, and read-only mode protects only services tagged `PROD`. Drop the table the agent created, then tag the service `PROD` as described in [Set up the agent](#set-up-the-agent).
 - **The agent can't fork the service.** The `read_only` option has the value `all`, which removes the fork tool from Tiger MCP. Run `tiger config set read_only prod`, then restart Claude Code.
-- **Your own `tiger db query` fails as read-only.** The command ran without `TIGER_READ_ONLY=off`, so Tiger CLI opened a read-only session on the service tagged `PROD`. Put `TIGER_READ_ONLY=off` at the start of the same line as the command.
-- **The dashboard query stays slow after the change.** Some chunks keep the old setting, because TimescaleDB applies a new `segmentby` setting only to chunks it converts after the change. Find the chunks with no `segmentby` value in [`timescaledb_information.chunk_columnstore_settings`](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/chunk_columnstore_settings), and convert them to the rowstore and back to the columnstore, as `segmentby.sql` does.
+- **Your own `tiger db query` fails as read-only.** Read-only mode also applies to your own Tiger CLI commands. Put `TIGER_READ_ONLY=off` at the start of the same line as the command.
+- **The dashboard query stays slow after the change.** Some chunks still have no `segmentby` value, because TimescaleDB applies a new setting to a chunk only when it converts that chunk. Find those chunks in [`timescaledb_information.chunk_columnstore_settings`](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/chunk_columnstore_settings), and convert them to the rowstore and back to the columnstore, as `segmentby.sql` does.
 
 ## Recap
 
