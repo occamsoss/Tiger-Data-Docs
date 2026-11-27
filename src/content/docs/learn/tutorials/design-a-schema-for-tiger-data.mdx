@@ -14,7 +14,6 @@ If you want an overview of the decisions in a data model first, see [Design your
 - How to choose column types, a partition column, and a chunk interval.
 - Why a primary key on a hypertable includes the partition column.
 - How to choose `segmentby` and `orderby` for the columnstore.
-- Which table layout fits a workload.
 - Which query patterns a schema serves well and poorly, shown in `EXPLAIN` output.
 
 ## Set up the data
@@ -41,7 +40,7 @@ Initializing `DATABASE_URL` is required for the loading script in Step 4.
 </NumberedItem>
 <NumberedItem title="Create the version 1 table">
 
-Save this SQL as `schema_v1.sql` in your current directory, and run it in your `psql` session with `\i schema_v1.sql`:
+Create the first version of the table by running this SQL in your `psql` session:
 
 ```sql
 CREATE TABLE requests_v1 (
@@ -61,7 +60,7 @@ CREATE TABLE requests_v1 (
 );
 ```
 
-Version 1 takes the column types a quick import would pick, with no keys and no indexes.
+Version 1 takes the column types a quick import would pick, with no keys and no indexes. It is a wide table, with one row for each request and one column for each attribute. [Wide, narrow, and medium tables](https://www.tigerdata.com/docs/learn/data-model/wide-narrow-medium-tables) compares this layout with the other two.
 
 </NumberedItem>
 <NumberedItem title="Load the 311 dataset">
@@ -160,7 +159,7 @@ Verify the script loaded about 1 million rows into the table.
 
 ```
 Finding the newest request in the file...
-Shifting timestamps forward by 25 days.
+Shifting timestamps forward by 26 days.
 Sent 100,000 rows...
 ...
 Loaded 1,000,226 rows into requests_v1.
@@ -185,38 +184,9 @@ Verify the output shows about 1 million requests and a time range of 92 days tha
 ```
  requests |    first_request    |    last_request
 ----------+---------------------+---------------------
-  1000226 | 2026-08-26 19:00:22 | 2026-11-26 19:00:00
+  1000226 | 2026-08-27 03:00:22 | 2026-11-27 03:00:00
 (1 row)
 ```
-
-</NumberedItem>
-<NumberedItem title="Save the time boundaries as psql variables">
-
-Save the start of today, the start of yesterday, the date 30 days ago, and the key and creation time of the oldest request as `psql` variables by running this SQL:
-
-```sql
-SELECT date_trunc('day', now()) AS today_start,
-       date_trunc('day', now()) - INTERVAL '1 day' AS yesterday_start,
-       date_trunc('day', now()) - INTERVAL '30 days' AS month_start
-\gset
-
-SELECT unique_key AS lookup_key,
-       created_date AT TIME ZONE 'UTC' AS lookup_time
-FROM requests_v1
-ORDER BY created_date
-LIMIT 1
-\gset
-
-\echo :today_start :yesterday_start :month_start :lookup_key :lookup_time
-```
-
-Verify the output shows three timestamps that start with midnight today, then a request key and a timestamp from 92 days ago.
-
-```
-2026-11-26 00:00:00+00 2026-11-25 00:00:00+00 2026-10-27 00:00:00+00 69908186 2026-08-26 19:00:22+00
-```
-
-> **Note:** `psql` forgets these variables when you disconnect. If you reconnect during the tutorial, run this block again.
 
 </NumberedItem>
 </NumberedList>
@@ -224,81 +194,99 @@ Verify the output shows three timestamps that start with midnight today, then a 
 ## Measure the naive schema
 
 <NumberedList>
-<NumberedItem title="Save the benchmark">
+<NumberedItem title="Create the benchmark function">
 
-Save these five queries as `benchmark.sql`. Each one runs with [`EXPLAIN (ANALYZE, BUFFERS)`](https://www.postgresql.org/docs/current/sql-explain.html).
+Create a function that runs five queries against a table with [`EXPLAIN (ANALYZE, BUFFERS)`](https://www.postgresql.org/docs/current/sql-explain.html), and returns the execution time and the buffer count of each one, by running this SQL:
 
 ```sql
-\echo Query 1: newest requests
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT unique_key, created_date, agency, complaint_type
-FROM :tbl
-ORDER BY created_date DESC
-LIMIT 10;
+CREATE OR REPLACE FUNCTION benchmark(tbl regclass)
+RETURNS TABLE (query text, execution_ms numeric, buffers bigint)
+LANGUAGE plpgsql AS $$
+DECLARE
+    today   timestamptz := date_trunc('day', now());
+    key     bigint;
+    plan    json;
+    names   text[] := ARRAY['1. Newest requests', '2. One day',
+                            '3. 30-day aggregate', '4. One request',
+                            '5. One agency'];
+    queries text[] := ARRAY[
+        'SELECT unique_key, created_date, agency, complaint_type
+         FROM %1$s
+         ORDER BY created_date DESC
+         LIMIT 10',
 
-\echo Query 2: one day
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT complaint_type, count(*) AS requests
-FROM :tbl
-WHERE created_date >= :'yesterday_start'
-  AND created_date < :'today_start'
-GROUP BY complaint_type
-ORDER BY requests DESC
-LIMIT 5;
+        'SELECT complaint_type, count(*) AS requests
+         FROM %1$s
+         WHERE created_date >= %2$L AND created_date < %3$L
+         GROUP BY complaint_type
+         ORDER BY requests DESC
+         LIMIT 5',
 
-\echo Query 3: 30-day aggregate
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT agency, count(*) AS requests, count(closed_date) AS closed
-FROM :tbl
-WHERE created_date >= :'month_start'
-GROUP BY agency
-ORDER BY requests DESC;
+        'SELECT agency, count(*) AS requests, count(closed_date) AS closed
+         FROM %1$s
+         WHERE created_date >= %4$L
+         GROUP BY agency
+         ORDER BY requests DESC',
 
-\echo Query 4: one request
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT unique_key, created_date, agency, complaint_type, status
-FROM :tbl
-WHERE unique_key = :lookup_key;
+        'SELECT unique_key, created_date, agency, complaint_type, status
+         FROM %1$s
+         WHERE unique_key = %5$s',
 
-\echo Query 5: one agency
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT complaint_type, count(*) AS requests
-FROM :tbl
-WHERE agency = 'DOT'
-  AND created_date >= :'month_start'
-GROUP BY complaint_type
-ORDER BY requests DESC
-LIMIT 5;
+        'SELECT complaint_type, count(*) AS requests
+         FROM %1$s
+         WHERE agency = ''DOT'' AND created_date >= %4$L
+         GROUP BY complaint_type
+         ORDER BY requests DESC
+         LIMIT 5'
+    ];
+BEGIN
+    EXECUTE format('SELECT unique_key FROM %s ORDER BY created_date LIMIT 1', tbl)
+    INTO key;
 
-SELECT pg_size_pretty(coalesce(hypertable_size(:'tbl'),
-                               pg_total_relation_size(:'tbl'))) AS table_size;
+    FOR i IN 1 .. 5 LOOP
+        EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) '
+             || format(queries[i], tbl, today - INTERVAL '1 day', today,
+                       today - INTERVAL '30 days', key)
+        INTO plan;
+        query := names[i];
+        execution_ms := round((plan->0->>'Execution Time')::numeric, 2);
+        buffers := (plan->0->'Plan'->>'Shared Hit Blocks')::bigint
+                 + (plan->0->'Plan'->>'Shared Read Blocks')::bigint;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
 ```
+
+A buffer is an 8 kB block of table or index data, so the buffer count shows how much data a query read.
 
 </NumberedItem>
 <NumberedItem title="Run the benchmark against version 1">
 
-Set the `tbl` variable to `requests_v1` and run the benchmark twice with these commands:
+Run the benchmark against `requests_v1` and show the size of the table with these statements:
 
 ```sql
-\set tbl requests_v1
-\i benchmark.sql
-\i benchmark.sql
+SELECT * FROM benchmark('requests_v1');
+
+SELECT pg_size_pretty(pg_total_relation_size('requests_v1')) AS table_size;
 ```
 
-Record the `Execution Time` of each query and the table size from the second run, here and in every later benchmark step. The first run after a load also reads the new rows into memory.
-
-Verify every plan has a `Seq Scan` on `requests_v1`. This example shows the plan for Query 2, trimmed to the scan:
+Verify every query reads about the same number of buffers. With no index, PostgreSQL reads the whole table for each one.
 
 ```
-Limit  (cost=28667.03..28667.04 rows=5 width=25) (actual time=29.155..35.092 rows=5.00 loops=1)
-  Buffers: shared hit=22607
-  ...
-                                ->  Parallel Seq Scan on requests_v1  (cost=0.00..27311.80 rows=4313 width=17) (actual time=21.497..22.288 rows=3083.00 loops=4)
-                                      Filter: ((created_date >= '2026-11-25 00:00:00'::timestamp without time zone) AND (created_date < '2026-11-26 00:00:00'::timestamp without time zone))
-                                      Rows Removed by Filter: 246974
-                                      Buffers: shared hit=22472
-Planning Time: 0.127 ms
-Execution Time: 35.130 ms
+        query        | execution_ms | buffers
+---------------------+--------------+---------
+ 1. Newest requests  |        94.29 |   22583
+ 2. One day          |        33.36 |   22589
+ 3. 30-day aggregate |        51.99 |   22496
+ 4. One request      |        39.06 |   22472
+ 5. One agency       |        35.29 |   22496
+(5 rows)
+
+ table_size
+------------
+ 176 MB
+(1 row)
 ```
 
 </NumberedItem>
@@ -309,7 +297,7 @@ Execution Time: 35.130 ms
 <NumberedList>
 <NumberedItem title="Create the version 2 tables">
 
-Save this SQL as `schema_v2.sql` and run it with `\i schema_v2.sql`:
+Create a lookup table for the agencies and the second version of the requests table by running this SQL:
 
 ```sql
 CREATE TABLE agencies (
@@ -366,17 +354,26 @@ ANALYZE requests_v2;
 </NumberedItem>
 <NumberedItem title="Run the benchmark against version 2">
 
-Set `tbl` to `requests_v2` and run the benchmark twice with these commands:
+Run the benchmark against `requests_v2` with these statements:
 
 ```sql
-\set tbl requests_v2
-\i benchmark.sql
-\i benchmark.sql
+SELECT * FROM benchmark('requests_v2');
+
+SELECT pg_size_pretty(pg_total_relation_size('requests_v2')) AS table_size;
 ```
 
-Verify the table is smaller than `requests_v1` and every plan still has a `Seq Scan`. This example shows the table size:
+Verify the table is smaller than version 1, and every query still reads the whole table.
 
 ```
+        query        | execution_ms | buffers
+---------------------+--------------+---------
+ 1. Newest requests  |        93.66 |   16581
+ 2. One day          |        35.84 |   16491
+ 3. 30-day aggregate |        53.84 |   16491
+ 4. One request      |        34.77 |   16467
+ 5. One agency       |        38.86 |   16491
+(5 rows)
+
  table_size
 ------------
  129 MB
@@ -391,42 +388,9 @@ Verify the table is smaller than `requests_v1` and every plan still has a `Seq S
 The partition column for version 3 is `created_date`. Four of the five benchmark queries filter or sort on it, every request has a value for it, and the value never changes.
 
 <NumberedList>
-<NumberedItem title="Compare index growth with shared_buffers">
-
-A [hypertable](https://www.tigerdata.com/docs/learn/hypertables/understand-hypertables) has an index on its partition column by default. Create that index on `requests_v2` and estimate how much it grows in 1 day, 7 days, and 30 days by running this SQL:
-
-```sql
-CREATE INDEX requests_v2_created_date_idx
-    ON requests_v2 (created_date DESC);
-
-SELECT i AS chunk_interval,
-       pg_size_pretty((pg_indexes_size('requests_v2')
-           * extract(epoch FROM i)
-           / extract(epoch FROM s.last - s.first))::bigint)
-           AS index_growth,
-       current_setting('shared_buffers') AS shared_buffers
-FROM unnest(ARRAY['1 day', '7 days', '30 days']::interval[]) AS i,
-     (SELECT min(created_date) AS first, max(created_date) AS last
-      FROM requests_v2) AS s;
-```
-
-Verify the index growth for every interval is a small fraction of `shared_buffers`.
-
-```
- chunk_interval | index_growth | shared_buffers
-----------------+--------------+----------------
- 1 day          | 223 kB       | 8GB
- 7 days         | 1563 kB      | 8GB
- 30 days        | 6699 kB      | 8GB
-(3 rows)
-```
-
-The [chunk sizing guide](https://www.tigerdata.com/docs/learn/hypertables/sizing-hypertable-chunks) says to choose an interval whose index growth fits in `shared_buffers`, which is about 25% of main memory. All three intervals fit, so the choice depends on the queries. A shorter interval makes more chunks, and each chunk adds planning work to a query that covers a long time range. This tutorial uses 7 days, the TimescaleDB default, so a one-day query reads one chunk and a 30-day query reads five or six.
-
-</NumberedItem>
 <NumberedItem title="Create the version 3 hypertable">
 
-Save this SQL as `schema_v3.sql` and run it with `\i schema_v3.sql`. It uses [`CREATE TABLE ... WITH`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/create_table) to create a hypertable with the columns of `requests_v2`.
+Create the third version as a [hypertable](https://www.tigerdata.com/docs/learn/hypertables/understand-hypertables) with [`CREATE TABLE ... WITH`](https://www.tigerdata.com/docs/reference/timescaledb/hypertables/create_table) by running this SQL:
 
 ```sql
 CREATE TABLE requests_v3 (
@@ -442,7 +406,7 @@ CREATE TABLE requests_v3 (
 </NumberedItem>
 <NumberedItem title="Copy the rows and run the benchmark">
 
-Copy the rows into `requests_v3` and run the benchmark twice with these commands:
+Copy the rows into `requests_v3` and run the benchmark with these statements:
 
 ```sql
 INSERT INTO requests_v3
@@ -450,24 +414,52 @@ SELECT * FROM requests_v2;
 
 ANALYZE requests_v3;
 
-\set tbl requests_v3
-\i benchmark.sql
-\i benchmark.sql
+SELECT * FROM benchmark('requests_v3');
+
+SELECT pg_size_pretty(hypertable_size('requests_v3')) AS table_size;
 ```
 
-Verify the plan for Query 2 names one chunk. Chunk names start with `_hyper_`. This example is trimmed to the chunk line.
+Verify Queries 1 and 2 read far fewer buffers than on version 2.
 
 ```
-Limit  (cost=623.03..623.04 rows=5 width=24) (actual time=4.425..4.427 rows=5.00 loops=1)
-  Buffers: shared hit=358
-  ...
-              ->  Index Scan using _hyper_7_1076_chunk_requests_v3_created_date_idx on _hyper_7_1076_chunk  (cost=0.29..558.35 rows=12153 width=16) (actual time=0.010..2.299 rows=12332.00 loops=1)
-                    Index Cond: ((created_date >= '2026-11-25 00:00:00+00'::timestamp with time zone) AND (created_date < '2026-11-26 00:00:00+00'::timestamp with time zone))
-                    Index Searches: 1
-                    Buffers: shared hit=358
-Planning Time: 0.215 ms
-Execution Time: 4.452 ms
+        query        | execution_ms | buffers
+---------------------+--------------+---------
+ 1. Newest requests  |         0.16 |      42
+ 2. One day          |         3.60 |     218
+ 3. 30-day aggregate |        34.10 |    5704
+ 4. One request      |        25.07 |   16473
+ 5. One agency       |        18.17 |    5704
+(5 rows)
+
+ table_size
+------------
+ 165 MB
+(1 row)
 ```
+
+TimescaleDB stores each 7 days of requests in a separate chunk, and reads only the chunks that a query's time filter covers. Query 2 asks for one day, so it reads one chunk. The table is larger than version 2 because a hypertable has an index on its partition column by default.
+
+</NumberedItem>
+<NumberedItem title="Check the chunk interval">
+
+Compare the largest index of a single chunk with `shared_buffers` by running this SQL:
+
+```sql
+SELECT pg_size_pretty(max(index_bytes)) AS largest_chunk_index,
+       current_setting('shared_buffers') AS shared_buffers
+FROM chunks_detailed_size('requests_v3');
+```
+
+Verify the index is a small fraction of `shared_buffers`.
+
+```
+ largest_chunk_index | shared_buffers
+---------------------+----------------
+ 3040 kB             | 8GB
+(1 row)
+```
+
+The [chunk sizing guide](https://www.tigerdata.com/docs/learn/hypertables/sizing-hypertable-chunks) says the indexes of the chunks that receive new data should fit in about 25% of main memory, which is the `shared_buffers` setting. This data leaves room for a much longer interval. The default of 7 days keeps a one-day or one-week query on one or two chunks, and a longer interval would make those queries read more rows than they need.
 
 </NumberedItem>
 </NumberedList>
@@ -509,28 +501,31 @@ ALTER TABLE requests_v3
 </NumberedItem>
 <NumberedItem title="Run the benchmark with the keys">
 
-Run the benchmark against `requests_v3` twice more with these commands:
+Run the benchmark against `requests_v3` again with these statements:
 
 ```sql
-\i benchmark.sql
-\i benchmark.sql
+SELECT * FROM benchmark('requests_v3');
+
+SELECT pg_size_pretty(hypertable_size('requests_v3')) AS table_size;
 ```
 
-Verify the plan for Query 4 uses the primary key's index on every chunk. This example is trimmed to the first chunk line.
+Verify Query 4 is faster and reads far fewer buffers than in the previous run.
 
 ```
-Append  (cost=0.28..65.70 rows=15 width=40) (actual time=0.012..0.068 rows=1.00 loops=1)
-  Buffers: shared hit=39
-  ->  Index Scan using "1063_requests_v3_pkey" on _hyper_7_1063_chunk  (cost=0.28..4.29 rows=1 width=42) (actual time=0.012..0.013 rows=1.00 loops=1)
-        Index Cond: (unique_key = 69908186)
-        Index Searches: 1
-        Buffers: shared hit=3
-  ...
-Planning Time: 0.495 ms
-Execution Time: 0.126 ms
-```
+        query        | execution_ms | buffers
+---------------------+--------------+---------
+ 1. Newest requests  |         0.17 |      42
+ 2. One day          |         3.53 |     218
+ 3. 30-day aggregate |        34.17 |    5704
+ 4. One request      |         0.37 |      38
+ 5. One agency       |        18.29 |    5704
+(5 rows)
 
-Query 4 has no filter on `created_date`, so TimescaleDB searches the index of every chunk.
+ table_size
+------------
+ 196 MB
+(1 row)
+```
 
 </NumberedItem>
 </NumberedList>
@@ -542,22 +537,17 @@ The [columnstore](https://www.tigerdata.com/docs/learn/columnar-storage/understa
 <NumberedList>
 <NumberedItem title="Count the rows for each candidate column">
 
-Save the name of the newest full chunk as a `psql` variable, and show the average number of rows in that chunk for each value of four candidate `segmentby` columns, by running this SQL:
+Count the rows in 7 days of requests, and the average for each value of four candidate `segmentby` columns, by running this SQL:
 
 ```sql
-SELECT format('%I.%I', chunk_schema, chunk_name) AS sample_chunk
-FROM timescaledb_information.chunks
-WHERE hypertable_name = 'requests_v3'
-ORDER BY range_start DESC
-LIMIT 1 OFFSET 1
-\gset
-
 SELECT count(*) AS rows,
        count(*) / count(DISTINCT agency) AS per_agency,
        count(*) / count(DISTINCT borough) AS per_borough,
        count(*) / count(DISTINCT complaint_type) AS per_complaint_type,
        count(*) / count(DISTINCT unique_key) AS per_unique_key
-FROM :sample_chunk;
+FROM requests_v3
+WHERE created_date >= now() - INTERVAL '14 days'
+  AND created_date < now() - INTERVAL '7 days';
 ```
 
 Example output:
@@ -565,11 +555,11 @@ Example output:
 ```
  rows  | per_agency | per_borough | per_complaint_type | per_unique_key
 -------+------------+-------------+--------------------+----------------
- 80625 |       5758 |       13437 |                500 |              1
+ 83210 |       5943 |       13868 |                526 |              1
 (1 row)
 ```
 
-A `segmentby` column needs two things. Queries filter or group on it, and each of its values has enough rows in a chunk to fill batches. Queries 3 and 5 use `agency`, and `agency` averages thousands of rows for each value in a chunk, so it is the `segmentby` column. A column such as `unique_key`, with one row for each value, would put every row in a batch of its own.
+A `segmentby` column is one that queries filter or group on, with enough rows for each value in a chunk to fill batches. Queries 3 and 5 use `agency`, which averages thousands of rows for each value, so it is the `segmentby` column. `unique_key` has one row for each value, which would put every row in a batch of its own.
 
 </NumberedItem>
 <NumberedItem title="Turn on the columnstore">
@@ -608,72 +598,54 @@ In an application, a [columnstore policy](https://www.tigerdata.com/docs/referen
 </NumberedItem>
 <NumberedItem title="Compare storage and run the benchmark">
 
-Show the size of `requests_v3` before and after compression with [`hypertable_columnstore_stats()`](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/hypertable_columnstore_stats), and run the benchmark twice, with these commands:
+Show the size of `requests_v3` before and after compression with [`hypertable_columnstore_stats()`](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/hypertable_columnstore_stats), and run the benchmark, with these statements:
 
 ```sql
 SELECT pg_size_pretty(before_compression_total_bytes) AS before,
        pg_size_pretty(after_compression_total_bytes) AS after
 FROM hypertable_columnstore_stats('requests_v3');
 
-\i benchmark.sql
-\i benchmark.sql
+SELECT * FROM benchmark('requests_v3');
 ```
 
-Verify the table is smaller after compression.
+Verify the table is smaller after compression, and Query 3 is faster and reads fewer buffers than in the previous run.
 
 ```
  before | after
 --------+-------
  196 MB | 31 MB
 (1 row)
+
+        query        | execution_ms | buffers
+---------------------+--------------+---------
+ 1. Newest requests  |         3.38 |     472
+ 2. One day          |         0.56 |      85
+ 3. 30-day aggregate |        11.50 |    1587
+ 4. One request      |         0.70 |     270
+ 5. One agency       |         0.88 |      83
+(5 rows)
 ```
 
-Verify Query 3 has a shorter `Execution Time` than in the previous benchmark run, and its chunk lines show `ColumnarScan`. This example is trimmed to the first chunk line.
-
-```
-Sort  (cost=14233.70..14233.73 rows=14 width=20) (actual time=8.902..12.156 rows=14.00 loops=1)
-  Sort Key: (count(*)) DESC
-  Sort Method: quicksort  Memory: 25kB
-  Buffers: shared hit=1540
-  ...
-                    ->  Custom Scan (VectorAgg)  (cost=2665.85..2665.99 rows=14 width=20) (actual time=0.078..0.468 rows=86.00 loops=1)
-                          Buffers: shared hit=312
-                          ->  Custom Scan (ColumnarScan) on _hyper_7_1073_chunk  (cost=32.97..1533.35 rows=151000 width=12) (actual time=0.000..0.001 rows=77182.00 loops=1)
-  ...
-Planning Time: 0.620 ms
-Execution Time: 12.303 ms
-```
+Queries 1 and 4 return a few rows, and they read more buffers in the columnstore than through the rowstore's indexes.
 
 </NumberedItem>
 </NumberedList>
 
-## Choose a table layout
-
-`requests_v3` is a wide table, with one row for each request and one typed column for each attribute. [Wide, narrow, and medium tables](https://www.tigerdata.com/docs/learn/data-model/wide-narrow-medium-tables) describes three layouts, and this table shows how each one would hold the 311 data.
-
-| Layout | Shape for this dataset | Fits when |
-|---|---|---|
-| Wide | One row for each request, with a column for each attribute, as in `requests_v3` | You know the attributes up front, and queries read several of them together |
-| Narrow | One table for each kind of event, such as `request_opened` and `request_closed`, each with a time, a key, and one or two values | You track a small, fixed set of values and query each one by itself |
-| Medium | One row for each attribute of a request, with an `attribute` name column and one value column for each data type | Attributes change often, or differ from one agency to the next |
-
-A wide table fits this dataset, because every request has the same attributes and the benchmark queries read several of them from each row.
-
-Split data across more than one hypertable in these three cases.
-
-- **Tenant.** Give a tenant its own hypertable when it needs its own columns or its own retention period. When tenants share both, keep them in one hypertable with a tenant column in `segmentby`, as `agency` is here.
-- **Data type.** Give a second kind of data its own hypertable when its columns or its arrival rate differ. A log of status changes for each request would be a second hypertable, because the columns, the chunk interval, `segmentby`, and `orderby` all belong to one hypertable.
-- **Retention period.** A [data retention policy](https://www.tigerdata.com/docs/reference/timescaledb/data-retention/add_retention_policy) drops whole chunks from one hypertable, so data that you keep for different lengths of time goes in different hypertables.
-
 ## Fix queries the schema serves poorly
 
-Version 3 serves a query well in two cases. The query filters on `created_date` with a value the planner knows before the query runs, or it reads rows in the columnstore's order. Each of the four queries in this section does neither, and each rewrite changes that.
+The columnstore serves a query well when the planner knows the query's time range before the query runs, or when the query reads rows in the columnstore's order. Each query in this section does neither, and each rewrite changes that.
 
 ### A lookup with no time filter
 
-Run `EXPLAIN (ANALYZE, BUFFERS)` on Query 4 from the benchmark.
+Save the key and creation time of the oldest request as `psql` variables, and run `EXPLAIN (ANALYZE, BUFFERS)` on a lookup by key alone, by running this SQL:
 
 ```sql
+SELECT unique_key AS lookup_key, created_date AS lookup_time
+FROM requests_v3
+ORDER BY created_date
+LIMIT 1
+\gset
+
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT unique_key, created_date, agency, complaint_type, status
 FROM requests_v3
@@ -683,19 +655,19 @@ WHERE unique_key = :lookup_key;
 Compare your plan with this example, which is trimmed to the first chunk line. The full plan has a similar line for every chunk.
 
 ```
-Append  (cost=22.40..507.72 rows=15000 width=40) (actual time=0.058..0.430 rows=1.00 loops=1)
-  Buffers: shared hit=224
-  ->  Custom Scan (ColumnarScan) on _hyper_7_1063_chunk  (cost=22.40..22.40 rows=1000 width=42) (actual time=0.058..0.059 rows=1.00 loops=1)
+Append  (cost=29.84..480.32 rows=14000 width=40) (actual time=0.105..0.427 rows=1.00 loops=1)
+  Buffers: shared hit=245
+  ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk  (cost=29.84..29.84 rows=1000 width=40) (actual time=0.104..0.111 rows=1.00 loops=1)
         Vectorized Filter: (unique_key = 69908186)
-        Rows Removed by Filter: 1217
-        Buffers: shared hit=12
-        ->  Seq Scan on _hyper_7_1063_chunk_compressed  (cost=0.00..12.40 rows=1 width=188) (actual time=0.017..0.020 rows=8.00 loops=1)
+        Rows Removed by Filter: 5842
+        Buffers: shared hit=49
+        ->  Seq Scan on _hyper_1_1_chunk_compressed  (cost=0.00..19.84 rows=1 width=188) (actual time=0.012..0.029 rows=9.00 loops=1)
               Filter: ((_ts_meta_min_2 <= 69908186) AND (_ts_meta_max_2 >= 69908186))
-              Rows Removed by Filter: 5
-              Buffers: shared hit=2
+              Rows Removed by Filter: 71
+              Buffers: shared hit=16
   ...
-Planning Time: 1.646 ms
-Execution Time: 0.595 ms
+Planning Time: 1.429 ms
+Execution Time: 0.617 ms
 ```
 
 Add the request's creation time to the filter, so the lookup uses the whole primary key.
@@ -711,19 +683,17 @@ WHERE unique_key = :lookup_key
 Verify the plan names one chunk.
 
 ```
-Custom Scan (ColumnarScan) on _hyper_7_1063_chunk  (cost=23.60..23.60 rows=1000 width=42) (actual time=0.048..0.050 rows=1.00 loops=1)
-  Vectorized Filter: ((unique_key = 69908186) AND (created_date = '2026-08-26 19:00:22+00'::timestamp with time zone))
-  Rows Removed by Filter: 110
-  Buffers: shared hit=10
-  ->  Seq Scan on _hyper_7_1063_chunk_compressed  (cost=0.00..13.60 rows=1 width=188) (actual time=0.021..0.022 rows=1.00 loops=1)
-        Filter: (_timescaledb_functions.bloom1_contains_any_hashes(_ts_meta_v2_bloomh_144d_unique_key_created_date, '{8718365011750695938}'::bigint[]) AND (_ts_meta_min_2 <= 69908186) AND (_ts_meta_max_2 >= 69908186) AND (_ts_meta_v2_last_created_date <= '2026-08-26 19:00:22+00'::timestamp with time zone) AND (_ts_meta_v2_first_created_date >= '2026-08-26 19:00:22+00'::timestamp with time zone))
-        Rows Removed by Filter: 12
-        Buffers: shared hit=2
-Planning Time: 0.536 ms
-Execution Time: 0.092 ms
+Custom Scan (ColumnarScan) on _hyper_1_1_chunk  (cost=31.76..31.76 rows=1000 width=40) (actual time=0.072..0.075 rows=1.00 loops=1)
+  Vectorized Filter: ((unique_key = 69908186) AND (created_date = '2026-08-27 03:00:22+00'::timestamp with time zone))
+  Rows Removed by Filter: 661
+  Buffers: shared hit=28
+  ->  Seq Scan on _hyper_1_1_chunk_compressed  (cost=0.00..21.76 rows=1 width=188) (actual time=0.037..0.040 rows=1.00 loops=1)
+        Filter: (_timescaledb_functions.bloom1_contains_any_hashes(_ts_meta_v2_bloomh_144d_unique_key_created_date, '{-6659748057482402944}'::bigint[]) AND (_ts_meta_min_2 <= 69908186) AND (_ts_meta_max_2 >= 69908186) AND (_ts_meta_v2_last_created_date <= '2026-08-27 03:00:22+00'::timestamp with time zone) AND (_ts_meta_v2_first_created_date >= '2026-08-27 03:00:22+00'::timestamp with time zone))
+        Rows Removed by Filter: 79
+        Buffers: shared hit=16
+Planning Time: 0.393 ms
+Execution Time: 0.111 ms
 ```
-
-An application can store `created_date` next to `unique_key` wherever it keeps a reference to a request.
 
 ### A start time from a volatile function
 
@@ -740,34 +710,34 @@ GROUP BY borough;
 Compare your plan with this example, which is trimmed to one chunk line from the middle of the plan. The full plan reads every chunk and removes most of the rows with a filter.
 
 ```
-Finalize HashAggregate  (cost=33553.16..33553.22 rows=6 width=16) (actual time=46.796..50.988 rows=6.00 loops=1)
+Finalize HashAggregate  (cost=32129.64..32129.70 rows=6 width=16) (actual time=44.946..48.990 rows=6.00 loops=1)
   Group Key: requests_v3.borough
   Batches: 1  Memory Usage: 32kB
-  Buffers: shared hit=7309
-  ->  Gather  (cost=33514.46..33551.36 rows=360 width=16) (actual time=5.351..50.975 rows=17.00 loops=1)
+  Buffers: shared hit=7209
+  ->  Gather  (cost=32093.52..32127.96 rows=336 width=16) (actual time=5.888..48.982 rows=6.00 loops=1)
         Workers Planned: 4
         Workers Launched: 4
-        Buffers: shared hit=7309
-        ->  Parallel Custom Scan (ChunkAppend) on requests_v3  (cost=32514.46..32515.36 rows=90 width=16) (actual time=28.112..36.306 rows=3.40 loops=5)
+        Buffers: shared hit=7209
+        ->  Parallel Custom Scan (ChunkAppend) on requests_v3  (cost=31093.52..31094.36 rows=84 width=16) (actual time=28.307..36.074 rows=1.20 loops=5)
               Chunks excluded during startup: 0
-              Buffers: shared hit=7309
+              Buffers: shared hit=7209
   ...
-              ->  Partial HashAggregate  (cost=2282.51..2282.57 rows=6 width=16) (actual time=12.873..12.874 rows=0.00 loops=1)
-                    Group Key: _hyper_7_1064_chunk.borough
+              ->  Partial HashAggregate  (cost=2282.51..2282.57 rows=6 width=16) (actual time=12.545..12.546 rows=0.00 loops=1)
+                    Group Key: _hyper_1_1_chunk.borough
                     Batches: 1  Memory Usage: 32kB
-                    Buffers: shared hit=502
-                    ->  Custom Scan (ColumnarScan) on _hyper_7_1064_chunk  (cost=10.12..1527.51 rows=151000 width=8) (actual time=12.871..12.872 rows=0.00 loops=1)
+                    Buffers: shared hit=494
+                    ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk  (cost=10.12..1527.51 rows=151000 width=8) (actual time=12.543..12.543 rows=0.00 loops=1)
                           Filter: (created_date >= (clock_timestamp() - '1 day'::interval))
-                          Rows Removed by Filter: 73434
-                          Buffers: shared hit=502
-                          ->  Parallel Seq Scan on _hyper_7_1064_chunk_compressed  (cost=0.00..17.51 rows=151 width=84) (actual time=0.004..0.025 rows=82.00 loops=1)
+                          Rows Removed by Filter: 72378
+                          Buffers: shared hit=494
+                          ->  Parallel Seq Scan on _hyper_1_1_chunk_compressed  (cost=0.00..17.51 rows=151 width=84) (actual time=0.009..0.030 rows=80.00 loops=1)
                                 Buffers: shared hit=16
   ...
-Planning Time: 1.726 ms
-Execution Time: 51.755 ms
+Planning Time: 1.383 ms
+Execution Time: 49.623 ms
 ```
 
-`clock_timestamp()` returns a new value each time PostgreSQL calls it, so PostgreSQL checks the filter against every row. `now()` returns one value for the whole transaction, and TimescaleDB uses that value to skip chunks during planning.
+`clock_timestamp()` returns a new value each time PostgreSQL calls it, so PostgreSQL checks the filter against every row. `now()` returns one value for the whole transaction, and TimescaleDB uses that value to skip chunks before it reads them.
 
 Replace `clock_timestamp()` with `now()`.
 
@@ -782,31 +752,24 @@ GROUP BY borough;
 Verify the plan names only the chunks that hold the past 24 hours.
 
 ```
-Finalize HashAggregate  (cost=2103.46..2103.52 rows=6 width=16) (actual time=0.556..0.559 rows=6.00 loops=1)
+Finalize HashAggregate  (cost=2103.46..2103.52 rows=6 width=16) (actual time=0.381..0.382 rows=6.00 loops=1)
   Group Key: requests_v3.borough
   Batches: 1  Memory Usage: 32kB
-  Buffers: shared hit=169
-  ->  Custom Scan (ChunkAppend) on requests_v3  (cost=2103.28..2103.40 rows=12 width=16) (actual time=0.235..0.545 rows=12.00 loops=1)
-        Chunks excluded during startup: 0
-        Buffers: shared hit=169
-        ->  Custom Scan (VectorAgg)  (cost=1295.48..1295.54 rows=6 width=16) (actual time=0.234..0.235 rows=6.00 loops=1)
-              Buffers: shared hit=97
-              ->  Custom Scan (ColumnarScan) on _hyper_7_1076_chunk  (cost=10.24..870.48 rows=85000 width=8) (actual time=0.000..0.000 rows=1502.00 loops=1)
+  Buffers: shared hit=78
+  ->  Custom Scan (ChunkAppend) on requests_v3  (cost=2103.28..2103.40 rows=12 width=16) (actual time=0.367..0.369 rows=6.00 loops=1)
+        Chunks excluded during startup: 1
+        Buffers: shared hit=78
+        ->  Custom Scan (VectorAgg)  (cost=807.80..807.86 rows=6 width=16) (actual time=0.366..0.368 rows=6.00 loops=1)
+              Buffers: shared hit=78
+              ->  Custom Scan (ColumnarScan) on _hyper_1_14_chunk  (cost=10.24..542.80 rows=53000 width=8) (actual time=0.000..0.000 rows=11034.00 loops=1)
                     Vectorized Filter: (created_date >= (now() - '1 day'::interval))
-                    Rows Removed by Filter: 9887
-                    ->  Seq Scan on _hyper_7_1076_chunk_compressed  (cost=0.00..20.48 rows=85 width=84) (actual time=0.014..0.050 rows=13.00 loops=1)
+                    Rows Removed by Filter: 612
+                    ->  Seq Scan on _hyper_1_14_chunk_compressed  (cost=0.00..12.80 rows=53 width=84) (actual time=0.013..0.023 rows=20.00 loops=1)
                           Filter: (_ts_meta_v2_first_created_date >= (now() - '1 day'::interval))
-                          Rows Removed by Filter: 75
-                          Buffers: shared hit=16
-        ->  Custom Scan (VectorAgg)  (cost=807.80..807.86 rows=6 width=16) (actual time=0.307..0.307 rows=6.00 loops=1)
-              Buffers: shared hit=72
-              ->  Custom Scan (ColumnarScan) on _hyper_7_1077_chunk  (cost=10.24..542.80 rows=53000 width=8) (actual time=0.000..0.000 rows=9393.00 loops=1)
-                    Vectorized Filter: (created_date >= (now() - '1 day'::interval))
-                    ->  Seq Scan on _hyper_7_1077_chunk_compressed  (cost=0.00..12.80 rows=53 width=84) (actual time=0.008..0.017 rows=19.00 loops=1)
-                          Filter: (_ts_meta_v2_first_created_date >= (now() - '1 day'::interval))
+                          Rows Removed by Filter: 3
                           Buffers: shared hit=4
-Planning Time: 0.486 ms
-Execution Time: 0.665 ms
+Planning Time: 0.461 ms
+Execution Time: 0.449 ms
 ```
 
 ### `DISTINCT ON` with no matching index
@@ -825,26 +788,35 @@ ORDER BY a.agency_name, r.created_date DESC;
 Compare your plan with this example, which is trimmed to the first chunk line. The full plan reads every row in every chunk, joins each row to `agencies`, and sorts the result.
 
 ```
-Unique  (cost=561613.31..579902.21 rows=200 width=57) (actual time=1164.995..1419.356 rows=14.00 loops=1)
-  Buffers: shared hit=6848, temp read=8895 written=8898
-  I/O Timings: temp read=14.690 write=23.422
-  ->  Sort  (cost=561613.31..570757.76 rows=3657780 width=57) (actual time=1164.994..1337.852 rows=1000226.00 loops=1)
-        Sort Key: a.agency_name, r.created_date DESC
-        Sort Method: external merge  Disk: 71160kB
-        Buffers: shared hit=6848, temp read=8895 written=8898
-        I/O Timings: temp read=14.690 write=23.422
-        ->  Hash Join  (cost=39.87..64636.39 rows=3657780 width=57) (actual time=0.059..326.173 rows=1000226.00 loops=1)
-              Hash Cond: (r.agency = a.agency)
-              Buffers: shared hit=6848
-              ->  Append  (cost=10.07..54984.48 rows=3648000 width=29) (actual time=0.022..153.396 rows=1000226.00 loops=1)
-                    Buffers: shared hit=6847
-                    ->  Custom Scan (ColumnarScan) on _hyper_7_1063_chunk r_1  (cost=10.07..1611.60 rows=160000 width=31) (actual time=0.022..0.180 rows=1349.00 loops=1)
-                          Buffers: shared hit=14
-                          ->  Seq Scan on _hyper_7_1063_chunk_compressed  (cost=0.00..11.60 rows=160 width=116) (actual time=0.013..0.016 rows=13.00 loops=1)
-                                Buffers: shared hit=2
+Unique  (cost=138276.93..565746.13 rows=200 width=57) (actual time=223.541..512.370 rows=14.00 loops=1)
+  Buffers: shared hit=7280, temp read=8907 written=8926
+  I/O Timings: temp read=14.638 write=24.000
+  ->  Gather Merge  (cost=138276.93..557003.33 rows=3497120 width=57) (actual time=223.540..442.251 rows=1000226.00 loops=1)
+        Workers Planned: 4
+        Workers Launched: 4
+        Buffers: shared hit=7280, temp read=8907 written=8926
+        I/O Timings: temp read=14.638 write=24.000
+        ->  Sort  (cost=137276.87..139462.57 rows=874280 width=57) (actual time=207.732..241.327 rows=200045.20 loops=5)
+              Sort Key: a.agency_name, r.created_date DESC
+              Sort Method: external merge  Disk: 14168kB
+              Buffers: shared hit=7280, temp read=8907 written=8926
+              I/O Timings: temp read=14.638 write=24.000
+              Worker 0:  Sort Method: external merge  Disk: 14568kB
+              Worker 1:  Sort Method: external merge  Disk: 13584kB
+              Worker 2:  Sort Method: external merge  Disk: 14296kB
+              Worker 3:  Sort Method: external merge  Disk: 14640kB
+              ->  Hash Join  (cost=39.92..27515.33 rows=874280 width=57) (actual time=0.187..66.353 rows=200045.20 loops=5)
+                    Hash Cond: (r.agency = a.agency)
+                    Buffers: shared hit=7216
+                    ->  Parallel Append  (cost=10.12..25179.64 rows=874225 width=29) (actual time=0.120..31.476 rows=200045.20 loops=5)
+                          Buffers: shared hit=7211
+                          ->  Custom Scan (ColumnarScan) on _hyper_1_14_chunk r_14  (cost=10.12..950.94 rows=94000 width=29) (actual time=0.144..1.264 rows=13117.00 loops=1)
+                                Buffers: shared hit=125
+                                ->  Parallel Seq Scan on _hyper_1_14_chunk_compressed  (cost=0.00..10.94 rows=94 width=116) (actual time=0.014..0.032 rows=23.00 loops=1)
+                                      Buffers: shared hit=4
   ...
-Planning Time: 1.548 ms
-Execution Time: 1426.186 ms
+Planning Time: 1.288 ms
+Execution Time: 514.019 ms
 ```
 
 The columnstore keeps each agency's rows together, sorted by `created_date` with the newest first. That order works as an index for a `DISTINCT ON (agency)` query that sorts the same way, and [SkipScan](https://www.tigerdata.com/docs/build/performance-optimization/skipscan) uses it to read one row for each agency in each chunk. `agency_name` comes from another table, so PostgreSQL has to join and sort every row to group by it.
@@ -867,35 +839,35 @@ ORDER BY a.agency_name;
 Verify the plan has a `SkipScan` line for each chunk and a lower buffer count. This example is trimmed to the first chunk line.
 
 ```
-Sort  (cost=52.60..52.63 rows=14 width=57) (actual time=2.934..2.942 rows=14.00 loops=1)
+Sort  (cost=50.64..50.67 rows=14 width=57) (actual time=3.073..3.080 rows=14.00 loops=1)
   Sort Key: a.agency_name
   Sort Method: quicksort  Memory: 26kB
-  Buffers: shared hit=1494
-  ->  Hash Join  (cost=31.21..52.33 rows=14 width=57) (actual time=2.915..2.928 rows=14.00 loops=1)
+  Buffers: shared hit=1605
+  ->  Hash Join  (cost=29.25..50.37 rows=14 width=57) (actual time=3.053..3.065 rows=14.00 loops=1)
         Hash Cond: (a.agency = r.agency)
-        Buffers: shared hit=1494
-        ->  Seq Scan on agencies a  (cost=0.00..18.80 rows=880 width=64) (actual time=0.012..0.014 rows=14.00 loops=1)
+        Buffers: shared hit=1605
+        ->  Seq Scan on agencies a  (cost=0.00..18.80 rows=880 width=64) (actual time=0.011..0.013 rows=14.00 loops=1)
               Buffers: shared hit=1
-        ->  Hash  (cost=31.04..31.04 rows=14 width=29) (actual time=2.894..2.900 rows=14.00 loops=1)
+        ->  Hash  (cost=29.08..29.08 rows=14 width=29) (actual time=3.029..3.035 rows=14.00 loops=1)
               Buckets: 1024  Batches: 1  Memory Usage: 9kB
-              Buffers: shared hit=1493
-              ->  Subquery Scan on r  (cost=4.82..31.04 rows=14 width=29) (actual time=0.351..2.891 rows=14.00 loops=1)
-                    Buffers: shared hit=1493
-                    ->  Unique  (cost=4.82..30.90 rows=14 width=29) (actual time=0.349..2.884 rows=14.00 loops=1)
-                          Buffers: shared hit=1493
-                          ->  Merge Append  (cost=4.82..30.38 rows=205 width=29) (actual time=0.348..2.853 rows=207.00 loops=1)
+              Buffers: shared hit=1604
+              ->  Subquery Scan on r  (cost=4.48..29.08 rows=14 width=29) (actual time=0.558..3.026 rows=14.00 loops=1)
+                    Buffers: shared hit=1604
+                    ->  Unique  (cost=4.48..28.94 rows=14 width=29) (actual time=0.556..3.019 rows=14.00 loops=1)
+                          Buffers: shared hit=1604
+                          ->  Merge Append  (cost=4.48..28.45 rows=193 width=29) (actual time=0.555..2.989 rows=195.00 loops=1)
                                 Sort Key: requests_v3.agency, requests_v3.created_date DESC
-                                Buffers: shared hit=1493
-                                ->  Custom Scan (SkipScan) on _hyper_7_1063_chunk  (cost=0.31..1.51 rows=12 width=31) (actual time=0.016..0.085 rows=12.00 loops=1)
-                                      Buffers: shared hit=33
-                                      ->  Custom Scan (ColumnarScan) on _hyper_7_1063_chunk  (cost=0.31..16026.55 rows=160000 width=31) (actual time=0.006..0.006 rows=0.92 loops=13)
-                                            Buffers: shared hit=33
-                                            ->  Index Scan using _hyper_7_1063_chunk_compresse_agency__ts_meta_v2_first_crea_idx on _hyper_7_1063_chunk_compressed  (cost=0.14..26.55 rows=160 width=124) (actual time=0.002..0.002 rows=0.92 loops=13)
-                                                  Index Searches: 13
-                                                  Buffers: shared hit=25
+                                Buffers: shared hit=1604
+                                ->  Custom Scan (SkipScan) on _hyper_1_1_chunk  (cost=0.30..1.60 rows=13 width=29) (actual time=0.039..0.194 rows=14.00 loops=1)
+                                      Buffers: shared hit=106
+                                      ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk  (cost=0.30..25639.99 rows=256000 width=29) (actual time=0.012..0.012 rows=0.93 loops=15)
+                                            Buffers: shared hit=106
+                                            ->  Index Scan using _hyper_1_1_chunk_compressed_agency__ts_meta_v2_first_create_idx on _hyper_1_1_chunk_compressed  (cost=0.14..39.99 rows=256 width=124) (actual time=0.004..0.004 rows=0.93 loops=15)
+                                                  Index Searches: 15
+                                                  Buffers: shared hit=29
   ...
-Planning Time: 1.687 ms
-Execution Time: 3.207 ms
+Planning Time: 1.568 ms
+Execution Time: 3.317 ms
 ```
 
 ### Time bounds from a join
@@ -910,7 +882,9 @@ CREATE TABLE report_periods (
 );
 
 INSERT INTO report_periods
-VALUES ('yesterday', :'yesterday_start', :'today_start');
+VALUES ('yesterday',
+        date_trunc('day', now()) - INTERVAL '1 day',
+        date_trunc('day', now()));
 
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT count(*)
@@ -924,27 +898,27 @@ WHERE p.period = 'yesterday';
 Compare your plan with this example, which is trimmed to the first chunk line. The full plan reads every chunk, and the `Join Filter` line removes the rows outside the period.
 
 ```
-Finalize Aggregate  (cost=43587.00..43587.01 rows=1 width=8) (actual time=86.456..90.259 rows=1.00 loops=1)
-  Buffers: shared hit=4098
-  ->  Gather  (cost=43586.58..43586.99 rows=4 width=8) (actual time=84.675..90.253 rows=5.00 loops=1)
+Finalize Aggregate  (cost=41726.03..41726.04 rows=1 width=8) (actual time=84.678..88.295 rows=1.00 loops=1)
+  Buffers: shared hit=3962
+  ->  Gather  (cost=41725.61..41726.02 rows=4 width=8) (actual time=82.629..88.290 rows=5.00 loops=1)
         Workers Planned: 4
         Workers Launched: 4
-        Buffers: shared hit=4098
-        ->  Partial Aggregate  (cost=42586.58..42586.59 rows=1 width=8) (actual time=76.854..76.862 rows=1.00 loops=5)
-              Buffers: shared hit=4098
-              ->  Nested Loop  (cost=10.27..42332.57 rows=101605 width=0) (actual time=60.115..76.724 rows=2466.40 loops=5)
+        Buffers: shared hit=3962
+        ->  Partial Aggregate  (cost=40725.61..40725.62 rows=1 width=8) (actual time=75.422..75.427 rows=1.00 loops=5)
+              Buffers: shared hit=3962
+              ->  Nested Loop  (cost=10.27..40482.75 rows=97142 width=0) (actual time=60.706..75.307 rows=2165.40 loops=5)
                     Join Filter: ((r.created_date >= p.starts) AND (r.created_date < p.ends))
-                    Rows Removed by Join Filter: 197579
-                    Buffers: shared hit=4098
-                    ->  Parallel Append  (cost=10.12..26330.33 rows=914175 width=8) (actual time=0.094..27.404 rows=200045.20 loops=5)
-                          Buffers: shared hit=4084
-                          ->  Custom Scan (ColumnarScan) on _hyper_7_1063_chunk r_1  (cost=10.12..950.94 rows=94000 width=8) (actual time=0.040..0.225 rows=1349.00 loops=1)
-                                Buffers: shared hit=53
-                                ->  Parallel Seq Scan on _hyper_7_1063_chunk_compressed  (cost=0.00..10.94 rows=94 width=52) (actual time=0.019..0.021 rows=13.00 loops=1)
-                                      Buffers: shared hit=2
+                    Rows Removed by Join Filter: 197880
+                    Buffers: shared hit=3962
+                    ->  Parallel Append  (cost=10.12..25179.64 rows=874225 width=8) (actual time=0.092..27.313 rows=200045.20 loops=5)
+                          Buffers: shared hit=3948
+                          ->  Custom Scan (ColumnarScan) on _hyper_1_14_chunk r_14  (cost=10.12..950.94 rows=94000 width=8) (actual time=0.096..0.976 rows=13117.00 loops=1)
+                                Buffers: shared hit=83
+                                ->  Parallel Seq Scan on _hyper_1_14_chunk_compressed  (cost=0.00..10.94 rows=94 width=52) (actual time=0.014..0.030 rows=23.00 loops=1)
+                                      Buffers: shared hit=4
   ...
-Planning Time: 1.097 ms
-Execution Time: 90.436 ms
+Planning Time: 0.978 ms
+Execution Time: 88.430 ms
 ```
 
 PostgreSQL reads the bounds from `report_periods` while the query runs, so the planner has no time range to skip chunks with.
@@ -967,19 +941,19 @@ WHERE created_date >= :'period_start'
 Verify the plan names one chunk.
 
 ```
-Finalize Aggregate  (cost=32.34..32.35 rows=1 width=8) (actual time=0.193..0.193 rows=1.00 loops=1)
-  Buffers: shared hit=82
-  ->  Custom Scan (VectorAgg)  (cost=32.34..32.35 rows=1 width=8) (actual time=0.189..0.190 rows=1.00 loops=1)
-        Buffers: shared hit=82
-        ->  Custom Scan (ColumnarScan) on _hyper_7_1076_chunk  (cost=29.84..29.84 rows=1000 width=0) (actual time=0.000..0.000 rows=12332.00 loops=1)
-              Vectorized Filter: ((created_date >= '2026-11-25 00:00:00+00'::timestamp with time zone) AND (created_date < '2026-11-26 00:00:00+00'::timestamp with time zone))
-              Rows Removed by Filter: 6216
-              ->  Seq Scan on _hyper_7_1076_chunk_compressed  (cost=0.00..19.84 rows=1 width=52) (actual time=0.010..0.037 rows=22.00 loops=1)
-                    Filter: ((_ts_meta_v2_first_created_date >= '2026-11-25 00:00:00+00'::timestamp with time zone) AND (_ts_meta_v2_last_created_date < '2026-11-26 00:00:00+00'::timestamp with time zone))
-                    Rows Removed by Filter: 66
-                    Buffers: shared hit=16
-Planning Time: 0.283 ms
-Execution Time: 0.221 ms
+Finalize Aggregate  (cost=24.90..24.91 rows=1 width=8) (actual time=0.168..0.169 rows=1.00 loops=1)
+  Buffers: shared hit=45
+  ->  Custom Scan (VectorAgg)  (cost=24.90..24.91 rows=1 width=8) (actual time=0.165..0.166 rows=1.00 loops=1)
+        Buffers: shared hit=45
+        ->  Custom Scan (ColumnarScan) on _hyper_1_14_chunk  (cost=22.40..22.40 rows=1000 width=0) (actual time=0.000..0.000 rows=10827.00 loops=1)
+              Vectorized Filter: ((created_date >= '2026-11-26 00:00:00+00'::timestamp with time zone) AND (created_date < '2026-11-27 00:00:00+00'::timestamp with time zone))
+              Rows Removed by Filter: 1290
+              ->  Seq Scan on _hyper_1_14_chunk_compressed  (cost=0.00..12.40 rows=1 width=52) (actual time=0.011..0.045 rows=22.00 loops=1)
+                    Filter: ((_ts_meta_v2_first_created_date >= '2026-11-26 00:00:00+00'::timestamp with time zone) AND (_ts_meta_v2_last_created_date < '2026-11-27 00:00:00+00'::timestamp with time zone))
+                    Rows Removed by Filter: 1
+                    Buffers: shared hit=4
+Planning Time: 0.311 ms
+Execution Time: 0.202 ms
 ```
 
 In an application, run the two queries one after the other and pass the bounds as parameters.
@@ -988,11 +962,8 @@ In an application, run the two queries one after the other and pass the bounds a
 
 These problems can come up while you follow the tutorial.
 
-- **`ALTER TABLE` still fails with `cannot create a unique index without the column "created_date"`.** The primary key's column list leaves out `created_date`. Run the second statement in [Add keys and constraints](#add-keys-and-constraints), which lists `unique_key` and `created_date`. Any unique index you add later needs `created_date` in its column list as well.
-- **`ALTER TABLE` warns that `unique_key` should be used for segmenting or ordering.** The `tsdb.orderby` setting leaves out `unique_key`, which is part of the primary key. Run the `ALTER TABLE` statement in [Choose segmentby and orderby](#choose-segmentby-and-orderby) again with `unique_key` in `tsdb.orderby`. The new setting applies to the chunks you convert after that.
-- **A plan shows a columnstore scan before [Choose segmentby and orderby](#choose-segmentby-and-orderby).** A columnstore policy converted chunks in the background, which happens when `schema_v3.sql` leaves out `tsdb.columnstore = false`. Run `DROP TABLE requests_v3;`, add the option to the file, run the file, and copy the rows again.
-- **A query fails with a syntax error at or near `:`.** The `psql` variables are missing, usually after a reconnect. Run the `\gset` block in [Set up the data](#set-up-the-data) again, and set `tbl` again with `\set tbl requests_v3`.
-- **A plan shows a different scan type from the tutorial.** Run `ANALYZE` on the table and run the plan again. PostgreSQL versions and service sizes can choose different scan types, and the chunk lines and buffer counts show the same result in either case.
+- **A query fails with a syntax error at or near `:`.** A `psql` variable is missing, usually after a reconnect. Run the statement that ends in `\gset` again. [A lookup with no time filter](#a-lookup-with-no-time-filter) sets `lookup_key` and `lookup_time`, and [Time bounds from a join](#time-bounds-from-a-join) sets `period_start` and `period_end`.
+- **A plan shows a different scan type from the tutorial.** PostgreSQL versions and service sizes can choose different scan types. Compare the chunk lines and the buffer counts, which show the same result in either case.
 
 ## Recap
 
@@ -1006,20 +977,20 @@ In this tutorial, you designed a schema in three versions and measured each one 
 | `segmentby` and `orderby` | `agency`, then `created_date DESC` and `unique_key` | A smaller table and a faster 30-day aggregate |
 | Query shape | A time filter the planner knows before the query runs, and `DISTINCT ON` the `segmentby` column | Fewer chunks and buffers read |
 
-These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. Times are the `Execution Time` of each query, from the second run of each benchmark.
+These measurements were collected from a test Tiger Cloud service with 8 CPUs and 32 GiB of memory, running PostgreSQL 18.7 and TimescaleDB 2.32.1. Times are the `execution_ms` values that `benchmark()` returned.
 
 | Measurement | Version 1 | Version 2 | Version 3 | Version 3 with keys | Version 3 in the columnstore |
 |---|---|---|---|---|---|
 | Table size | 176 MB | 129 MB | 165 MB | 196 MB | 31 MB |
-| Query 1, newest requests | 96 ms | 90 ms | 0.16 ms | 0.18 ms | 0.31 ms |
-| Query 2, one day | 35 ms | 31 ms | 4.5 ms | 4.5 ms | 0.70 ms |
-| Query 3, 30-day aggregate | 52 ms | 50 ms | 36 ms | 37 ms | 12 ms |
-| Query 4, one request | 41 ms | 30 ms | 28 ms | 0.13 ms | 0.53 ms |
-| Query 5, one agency | 37 ms | 35 ms | 25 ms | 21 ms | 0.91 ms |
+| Query 1, newest requests | 94 ms | 94 ms | 0.16 ms | 0.17 ms | 3.4 ms |
+| Query 2, one day | 33 ms | 36 ms | 3.6 ms | 3.5 ms | 0.56 ms |
+| Query 3, 30-day aggregate | 52 ms | 54 ms | 34 ms | 34 ms | 12 ms |
+| Query 4, one request | 39 ms | 35 ms | 25 ms | 0.37 ms | 0.70 ms |
+| Query 5, one agency | 35 ms | 39 ms | 18 ms | 18 ms | 0.88 ms |
 
-Column types made the table about 27% smaller, from 176 MB to 129 MB, and every query still read every row. Partitioning shortened the one-day query from 31 ms to 4.5 ms, because the query reads one chunk out of 15. The difference grows with the table. A query on a regular table scans more rows every month, and a one-day query on the hypertable keeps reading one chunk. The hypertable's indexes brought the table to 196 MB, and the columnstore then reduced it to 31 MB and shortened the 30-day aggregate from 37 ms to 12 ms.
+Column types made the table about 27% smaller, from 176 MB to 129 MB, and every query still read the whole table. Partitioning shortened the one-day query from 36 ms to 3.6 ms, because the query reads one chunk out of 14. The difference grows with the table. A query on a regular table reads more rows every month, and a one-day query on the hypertable keeps reading one chunk. The hypertable's indexes brought the table to 196 MB, and the columnstore then reduced it to 31 MB and shortened the 30-day aggregate from 34 ms to 12 ms. Queries 1 and 4 return a few rows, and they ran faster through the rowstore's indexes.
 
-For your next step, write the three versions for one of your own tables and run your five most frequent queries against each one. The version 1 numbers give you a baseline, so you can see what each decision changes on your own data before you change a production table.
+For your next step, write the three versions for one of your own tables, and replace the five queries in `benchmark()` with your five most frequent queries. The version 1 numbers give you a baseline, so you can see what each decision changes on your own data before you change a production table.
 
 ### Learn more
 
